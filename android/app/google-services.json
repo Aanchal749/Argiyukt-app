@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "895337484918",
+    "project_id": "agriyukt-6ddd1",
+    "storage_bucket": "agriyukt-6ddd1.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:895337484918:android:08672a2a8897de78b38557",
+        "android_client_info": {
+          "package_name": "com.example.agriyukt_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyC3hEow1hnb4QnndgKtSWxOqPowoaKOFPQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

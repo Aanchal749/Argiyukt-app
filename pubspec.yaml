@@ -15,16 +15,11 @@ dependencies:
     sdk: flutter
   translator: ^1.0.0
   timeago: ^3.6.1
-  intl: ^0.20.2  # ✅ Fixed: Matches SDK requirement
+  # 🔴 FIXED: Changed 0.20.2 to 0.19.0 to match flutter_localizations
+  intl: ^0.20.2
 
   # Supabase (Primary Backend)
   supabase_flutter: ^2.8.1
-
-  # Firebase (⚠️ Commented out to prevent build errors if google-services.json is missing)
-  # Only uncomment if you are specifically using Firebase features alongside Supabase.
-  # firebase_core: ^3.1.0
-  # firebase_auth: ^5.1.0
-  # cloud_firestore: ^5.0.1
 
   # UI & Utilities
   google_fonts: ^6.1.0

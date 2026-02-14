@@ -26,7 +26,7 @@ class _FullScreenTrackingState extends State<FullScreenTracking> {
   final Completer<GoogleMapController> _mapController = Completer();
 
   // 🔑 API KEY
-  final String googleApiKey = "AIzaSyABWOOnvnWa9bcZPfnXABYZWrd5VBj3LkY";
+  final String googleApiKey = "AIzaSyD1ioETNK6cCxUud9k98JuTH3SzoyN2Fjc";
 
   // State
   LatLng? _farmLocation;

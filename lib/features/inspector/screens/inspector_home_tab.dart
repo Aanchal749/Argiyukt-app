@@ -4,6 +4,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 import 'package:google_fonts/google_fonts.dart';
+import 'package:intl/intl.dart';
 
 // ✅ Screen Imports
 import 'package:agriyukt_app/features/inspector/screens/add_farmer_screen.dart';
@@ -48,50 +49,64 @@ class _InspectorHomeTabState extends State<InspectorHomeTab> {
     _fetchWeather();
   }
 
-  // --- 1. FETCH STATS (REWRITTEN FOR ACCURACY) ---
+  // --- 1. FETCH STATS (CORRECTED JOINS) ---
   Future<void> _fetchInspectorStats() async {
     try {
       final client = Supabase.instance.client;
       final user = client.auth.currentUser;
 
       if (user != null) {
-        // Fetch Profile Name
+        // 1. Get My Profile Name
         final profile = await client
             .from('profiles')
             .select('first_name')
             .eq('id', user.id)
             .maybeSingle();
 
-        // Count Assigned Farmers (Direct Relationship)
+        // 2. Get My Farmers
+        // "Who has my ID in their inspector_id column?"
         final farmersData = await client
             .from('profiles')
             .select('id')
             .eq('inspector_id', user.id)
             .eq('role', 'farmer');
 
-        // ✅ FIX: Count Crops managed by THIS Inspector directly
-        final cropsData =
-            await client.from('crops').select('id').eq('inspector_id', user.id);
+        // 3. Get Crops (Via Farmer Relationship)
+        // ✅ FIX: Explicitly use the foreign key 'crops_farmer_id_fkey' if needed,
+        // or just 'profiles!inner' if it's the only relationship.
+        // We use !inner to ensure we only get crops from OUR farmers.
+        final cropsData = await client
+            .from('crops')
+            .select('id, farmer:profiles!inner(inspector_id)')
+            .eq('farmer.inspector_id', user.id);
 
-        // ✅ FIX: Count Orders for crops managed by THIS Inspector using inner join
-        final ordersData = await client
+        // 4. Get Orders (Via Farmer Relationship)
+        // ✅ CRITICAL FIX: We MUST specify '!fk_orders_farmer'
+        // because orders has TWO links to profiles (Buyer & Farmer).
+        // Without this, it might join the Buyer and return 0 results.
+        final ordersResponse = await client
             .from('orders')
-            .select('status, crops!inner(inspector_id)')
-            .eq('crops.inspector_id', user.id);
+            .select(
+                'status, farmer:profiles!fk_orders_farmer!inner(inspector_id)')
+            .eq('farmer.inspector_id', user.id);
 
+        // 5. Calculate Order Statuses locally
         int pending = 0;
         int active = 0;
+        final ordersList = ordersResponse as List<dynamic>;
 
-        for (var o in (ordersData as List)) {
-          String status = (o['status'] ?? '').toString().toLowerCase();
-          if (status == 'pending') {
+        for (var o in ordersList) {
+          String status = (o['status'] ?? '').toString().toLowerCase().trim();
+
+          if (status == 'pending' || status == 'ordered') {
             pending++;
           } else if ([
             'accepted',
             'packed',
             'shipped',
             'in transit',
-            'processing'
+            'processing',
+            'confirmed'
           ].contains(status)) {
             active++;
           }
@@ -109,7 +124,7 @@ class _InspectorHomeTabState extends State<InspectorHomeTab> {
         }
       }
     } catch (e) {
-      debugPrint("Stats Fetch Error: $e");
+      debugPrint("❌ Stats Fetch Error: $e");
       if (mounted) setState(() => _loading = false);
     }
   }
@@ -191,14 +206,26 @@ class _InspectorHomeTabState extends State<InspectorHomeTab> {
           children: [
             const SizedBox(height: 20),
 
-            // 1. GREETING
+            // 1. GREETING & DATE
             Padding(
               padding: sectionPadding,
-              child: Text("Namaste,Aanchal 👋",
-                  style: GoogleFonts.poppins(
-                      fontSize: 24,
-                      fontWeight: FontWeight.bold,
-                      color: _primaryColor)),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text("Namaste, $_name 👋",
+                      style: GoogleFonts.poppins(
+                          fontSize: 24,
+                          fontWeight: FontWeight.bold,
+                          color: _primaryColor)),
+                  Text(
+                    DateFormat('EEEE, d MMMM').format(DateTime.now()),
+                    style: GoogleFonts.poppins(
+                        color: Colors.grey[600],
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500),
+                  ),
+                ],
+              ),
             ),
 
             const SizedBox(height: 20),

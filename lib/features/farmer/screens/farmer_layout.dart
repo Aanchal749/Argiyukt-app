@@ -3,58 +3,55 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:provider/provider.dart';
 
-// ✅ LOCALIZATION IMPORTS
+// Localization
 import 'package:agriyukt_app/features/farmer/farmer_translations.dart';
 import 'package:agriyukt_app/core/providers/language_provider.dart';
 
-// ✅ REAL IMPORTS
+// Screens
 import 'package:agriyukt_app/features/farmer/screens/farmer_home_screen.dart';
 import 'package:agriyukt_app/features/farmer/screens/my_crops_tab.dart';
 import 'package:agriyukt_app/features/farmer/screens/orders_screen.dart';
 import 'package:agriyukt_app/features/farmer/screens/profile_tab.dart';
-import 'package:agriyukt_app/features/farmer/screens/alerts_tab.dart';
+
+// ✅ FIX 1: Hide OrdersScreen from alerts_tab to prevent conflict
+import 'package:agriyukt_app/features/farmer/screens/alerts_tab.dart' hide OrdersScreen;
 import 'package:agriyukt_app/features/farmer/screens/widgets/farmer_drawer.dart';
 
 class FarmerLayout extends StatefulWidget {
-  const FarmerLayout({super.key});
+  final int initialIndex;
+
+  const FarmerLayout({super.key, this.initialIndex = 0});
 
   @override
   State<FarmerLayout> createState() => _FarmerLayoutState();
 }
 
 class _FarmerLayoutState extends State<FarmerLayout> {
-  int _currentIndex = 0;
+  late int _currentIndex;
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
 
-  // ✅ FIXED: Removed 'late final' and initialized directly without 'const'
-  // This solves the "Not a constant expression" error completely.
-  final List<Widget> _screens = [
-    const FarmerHomeScreen(),
-    const MyCropsTab(), // If this line errors, remove 'const' from here
-    const OrdersScreen(),
-    const ProfileTab(),
-  ];
-
-  // 👇 IF THE ABOVE STILL FAILS, USE THIS LIST INSTEAD:
-  /*
+  // ✅ FIX 2: Removed 'const' completely to prevent "Not a constant expression" error
   final List<Widget> _screens = [
     FarmerHomeScreen(),
     MyCropsTab(),
     OrdersScreen(),
     ProfileTab(),
   ];
-  */
+
+  @override
+  void initState() {
+    super.initState();
+    _currentIndex = widget.initialIndex;
+  }
 
   void _switchTab(int index) {
     setState(() => _currentIndex = index);
   }
 
-  // ✅ Helper for Localized Text
   String _text(String key) => FarmerText.get(context, key);
 
   @override
   Widget build(BuildContext context) {
-    // Listen to language changes
     Provider.of<LanguageProvider>(context);
 
     return Scaffold(
@@ -94,8 +91,9 @@ class _FarmerLayoutState extends State<FarmerLayout> {
                   IconButton(
                     icon: const Icon(Icons.notifications_outlined,
                         color: Colors.white, size: 26),
+                    // ✅ FIX 3: Removed 'const' here
                     onPressed: () => Navigator.push(context,
-                        MaterialPageRoute(builder: (_) => const AlertsTab())),
+                        MaterialPageRoute(builder: (_) => AlertsTab())),
                   ),
                   if (hasUnread)
                     Positioned(

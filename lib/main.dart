@@ -3,7 +3,6 @@ import 'package:provider/provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 // --- PROVIDERS ---
 import 'package:agriyukt_app/core/providers/language_provider.dart';
@@ -12,7 +11,7 @@ import 'package:agriyukt_app/core/providers/language_provider.dart';
 import 'package:agriyukt_app/features/auth/controllers/login_controller.dart';
 import 'package:agriyukt_app/features/onboarding/onboarding_controller.dart';
 
-// --- SCREENS (Auth & Onboarding) ---
+// --- SCREENS ---
 import 'package:agriyukt_app/features/onboarding/screens/splash_screen.dart';
 import 'package:agriyukt_app/features/onboarding/screens/language_screen.dart';
 import 'package:agriyukt_app/features/onboarding/screens/onboarding_screen.dart';
@@ -20,7 +19,7 @@ import 'package:agriyukt_app/features/auth/screens/login_screen.dart';
 import 'package:agriyukt_app/features/auth/screens/forgot_password_screen.dart';
 import 'package:agriyukt_app/features/auth/screens/registration/create_account/create_account_screen.dart';
 
-// --- DASHBOARDS (Role Based) ---
+// --- DASHBOARDS ---
 import 'package:agriyukt_app/features/farmer/screens/farmer_layout.dart';
 import 'package:agriyukt_app/features/buyer/screens/buyer_dashboard.dart';
 import 'package:agriyukt_app/features/inspector/screens/inspector_layout.dart';
@@ -28,14 +27,14 @@ import 'package:agriyukt_app/features/inspector/screens/inspector_layout.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // 1. Initialize Supabase (Use your exact URL and Key)
+  // 1. Initialize Supabase
   await Supabase.initialize(
     url: 'https://lyrbnrazuxjilbhdylwt.supabase.co',
     anonKey:
         'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx5cmJucmF6dXhqaWxiaGR5bHd0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjY1OTE2MDQsImV4cCI6MjA4MjE2NzYwNH0.5HzDWNcNZD5kZw89QNsJFQhnbZwtVx2CMoRzaBZBmHk',
   );
 
-  // 2. Load Saved Language Preference
+  // 2. Load Saved Language (for text translation only)
   final languageProvider = LanguageProvider();
   await languageProvider.loadSavedLanguage();
 
@@ -56,7 +55,6 @@ class AgriYuktApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Listen to Language Provider for dynamic locale changes
     final languageProvider = Provider.of<LanguageProvider>(context);
 
     return MaterialApp(
@@ -75,8 +73,8 @@ class AgriYuktApp extends StatelessWidget {
       locale: languageProvider.appLocale,
       supportedLocales: const [
         Locale('en', 'US'),
-        Locale('mr', 'IN'), // Marathi
-        Locale('hi', 'IN'), // Hindi
+        Locale('mr', 'IN'),
+        Locale('hi', 'IN'),
       ],
       localizationsDelegates: const [
         GlobalMaterialLocalizations.delegate,
@@ -84,8 +82,7 @@ class AgriYuktApp extends StatelessWidget {
         GlobalCupertinoLocalizations.delegate,
       ],
 
-      // --- ROUTE MAP ---
-      // This map allows you to navigate using strings (e.g. Navigator.pushNamed)
+      // --- ROUTES ---
       routes: {
         '/splash': (context) => const SplashScreen(),
         '/language': (context) => const LanguageScreen(fromProfile: false),
@@ -101,7 +98,6 @@ class AgriYuktApp extends StatelessWidget {
       },
 
       // --- ENTRY POINT ---
-      // Instead of a static screen, we use the FlowOrchestrator to decide where to go
       home: const FlowOrchestrator(),
     );
   }
@@ -109,7 +105,7 @@ class AgriYuktApp extends StatelessWidget {
 
 /// ---------------------------------------------------------------------------
 /// THE FLOW ORCHESTRATOR
-/// This widget runs the logic: Splash -> Language -> Onboarding -> Auth -> Dashboard
+/// Strictly implements: Token ? Dashboard : Language -> Onboarding -> Login
 /// ---------------------------------------------------------------------------
 class FlowOrchestrator extends StatefulWidget {
   const FlowOrchestrator({super.key});
@@ -122,51 +118,40 @@ class _FlowOrchestratorState extends State<FlowOrchestrator> {
   @override
   void initState() {
     super.initState();
-    _startAppFlow();
+    _decideNavigation();
   }
 
-  Future<void> _startAppFlow() async {
-    // 1. Show Splash Screen for 2 seconds (visual requirement)
+  Future<void> _decideNavigation() async {
+    // 1. Always show Splash for 2 seconds
     await Future.delayed(const Duration(seconds: 2));
 
     if (!mounted) return;
 
-    // 2. Get User Preferences & Auth Session
-    final prefs = await SharedPreferences.getInstance();
+    // 2. CHECK LOGIN STATUS
+    // We check Supabase Session. If it exists, user is "Logged In".
+    // If it is null, user is "Not Logged In".
     final session = Supabase.instance.client.auth.currentSession;
 
-    // --- CHECK 1: LANGUAGE ---
-    // Has the user ever selected a language?
-    final bool isLanguageSet = prefs.getBool('isLanguageSet') ?? false;
-
-    if (!isLanguageSet) {
-      // Logic: User is new -> Go to Language Screen
-      if (mounted) Navigator.pushReplacementNamed(context, '/language');
-      return;
-    }
-
-    // --- CHECK 2: ONBOARDING ---
-    // Has the user seen the onboarding slider?
-    final bool seenOnboarding = prefs.getBool('seenOnboarding') ?? false;
-
-    if (!seenOnboarding) {
-      // Logic: User selected language but hasn't seen intro -> Go to Onboarding
-      if (mounted) Navigator.pushReplacementNamed(context, '/onboarding');
-      return;
-    }
-
-    // --- CHECK 3: AUTHENTICATION ---
-    // Is the user logged in?
     if (session != null) {
-      // Logic: User is logged in -> Determine Role and go to Dashboard
+      // ─────────────────────────────────────────────────────────────
+      // CASE 1: LOGGED IN
+      // Flow: Splash -> Dashboard
+      // ─────────────────────────────────────────────────────────────
+      debugPrint("✅ User Logged In. Navigating to Dashboard...");
       await _navigateToRoleDashboard(session.user.id);
     } else {
-      // Logic: User is NOT logged in -> Go to Login Screen
-      if (mounted) Navigator.pushReplacementNamed(context, '/login');
+      // ─────────────────────────────────────────────────────────────
+      // CASE 2: NOT LOGGED IN (or Logged Out)
+      // Flow: Splash -> Language -> Onboarding -> Login
+      // ─────────────────────────────────────────────────────────────
+      debugPrint("❌ User Not Logged In. Starting Fresh Flow...");
+
+      // Go to Language Screen
+      // (Language Screen must have a button to go to '/onboarding')
+      if (mounted) Navigator.pushReplacementNamed(context, '/language');
     }
   }
 
-  /// Helper to fetch user role and redirect
   Future<void> _navigateToRoleDashboard(String userId) async {
     try {
       final data = await Supabase.instance.client
@@ -184,19 +169,17 @@ class _FlowOrchestratorState extends State<FlowOrchestrator> {
       } else if (role == 'inspector') {
         Navigator.pushReplacementNamed(context, '/inspector-dashboard');
       } else {
-        // Default to Farmer if role is farmer or unknown
         Navigator.pushReplacementNamed(context, '/farmer-dashboard');
       }
     } catch (e) {
-      // Safety Fallback: If DB check fails, go to Login
-      debugPrint("Auth Flow Error: $e");
+      debugPrint("Error fetching role: $e");
+      // Fallback: If network fails, treat as not logged in
       if (mounted) Navigator.pushReplacementNamed(context, '/login');
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    // While _startAppFlow runs, the user sees the Splash Screen
     return const SplashScreen();
   }
 }

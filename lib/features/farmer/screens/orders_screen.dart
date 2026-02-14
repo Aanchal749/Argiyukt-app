@@ -7,14 +7,17 @@ import 'package:provider/provider.dart';
 // ✅ LOCALIZATION IMPORTS
 import 'package:agriyukt_app/features/farmer/farmer_translations.dart';
 import 'package:agriyukt_app/core/providers/language_provider.dart';
-import 'package:agriyukt_app/core/services/translation_service.dart';
-
 import 'package:agriyukt_app/features/farmer/screens/farmer_order_detail_screen.dart';
 
 class OrdersScreen extends StatefulWidget {
   final int initialIndex;
+  final String? highlightOrderId; // ✅ Added for deep linking
 
-  const OrdersScreen({super.key, this.initialIndex = 0});
+  const OrdersScreen({
+    super.key,
+    this.initialIndex = 0,
+    this.highlightOrderId,
+  });
 
   @override
   State<OrdersScreen> createState() => _OrdersScreenState();
@@ -24,7 +27,11 @@ class _OrdersScreenState extends State<OrdersScreen>
     with SingleTickerProviderStateMixin {
   late TabController _tabController;
   final _supabase = Supabase.instance.client;
-  int _refreshTrigger = 0; // ✅ Added for Refresh Logic
+  int _refreshTrigger = 0;
+
+  // ✅ SCROLL CONTROLLER
+  final ScrollController _scrollController = ScrollController();
+  bool _hasScrolled = false;
 
   // Theme Color
   final Color _primaryGreen = const Color(0xFF1B5E20);
@@ -39,19 +46,52 @@ class _OrdersScreenState extends State<OrdersScreen>
   @override
   void dispose() {
     _tabController.dispose();
+    _scrollController.dispose();
     super.dispose();
   }
 
   String _text(String key) => FarmerText.get(context, key);
 
-  // ✅ FORCE REFRESH FUNCTION
   void _triggerRefresh() {
     if (mounted) {
       setState(() => _refreshTrigger++);
     }
   }
 
-  // ✅ INSTANT UPDATE LOGIC
+  // ✅ AUTO-SCROLL LOGIC
+  void _attemptAutoScroll(List<Map<String, dynamic>> targetList) {
+    if (widget.highlightOrderId == null || _hasScrolled || targetList.isEmpty)
+      return;
+
+    final index = targetList
+        .indexWhere((o) => o['id'].toString() == widget.highlightOrderId);
+
+    if (index != -1) {
+      _hasScrolled = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_scrollController.hasClients) {
+          // Approx height of one card + padding (280px)
+          final double position = index * 280.0;
+
+          _scrollController.animateTo(
+            position,
+            duration: const Duration(milliseconds: 800),
+            curve: Curves.easeOut,
+          );
+
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text("Order Found!", style: GoogleFonts.poppins()),
+              backgroundColor: _primaryGreen,
+              duration: const Duration(seconds: 1),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+      });
+    }
+  }
+
   Future<bool> _updateStatus(dynamic orderId, String newStatus) async {
     try {
       await _supabase
@@ -68,7 +108,7 @@ class _OrdersScreenState extends State<OrdersScreen>
             duration: const Duration(milliseconds: 800),
           ),
         );
-        _triggerRefresh(); // ✅ Refresh immediately after update
+        _triggerRefresh();
       }
       return true;
     } catch (e) {
@@ -92,7 +132,8 @@ class _OrdersScreenState extends State<OrdersScreen>
           'Confirmed',
           'Packed',
           'Shipped',
-          'Out for Delivery'
+          'Out for Delivery',
+          'Processing'
         ].contains(status);
         bool isFinished = ['Delivered', 'Completed', 'Rejected', 'Cancelled']
             .contains(tracking);
@@ -135,7 +176,6 @@ class _OrdersScreenState extends State<OrdersScreen>
       body: myId == null
           ? const Center(child: Text("Login Required"))
           : StreamBuilder<List<Map<String, dynamic>>>(
-              // ✅ Key forces refresh when triggered
               key: ValueKey(_refreshTrigger),
               stream: _supabase
                   .from('orders')
@@ -150,29 +190,53 @@ class _OrdersScreenState extends State<OrdersScreen>
 
                 final allOrders = snapshot.data ?? [];
 
+                final pendingList = _filterOrders(allOrders, 'pending');
+                final activeList = _filterOrders(allOrders, 'active');
+                final historyList = _filterOrders(allOrders, 'history');
+
+                // ✅ EXECUTE SCROLL LOGIC ONCE based on Initial Index
+                if (widget.highlightOrderId != null && !_hasScrolled) {
+                  if (widget.initialIndex == 0)
+                    _attemptAutoScroll(pendingList);
+                  else if (widget.initialIndex == 1)
+                    _attemptAutoScroll(activeList);
+                  else
+                    _attemptAutoScroll(historyList);
+                }
+
                 return TabBarView(
                   controller: _tabController,
                   children: [
                     _OrderList(
-                      orders: _filterOrders(allOrders, 'pending'),
+                      // ✅ Attach Controller ONLY if this is the active tab
+                      controller:
+                          widget.initialIndex == 0 ? _scrollController : null,
+                      orders: pendingList,
                       emptyMsg: "No new order requests",
                       tabType: 'pending',
                       onStatusUpdate: _updateStatus,
-                      onRefresh: _triggerRefresh, // Pass refresh callback
+                      onRefresh: _triggerRefresh,
+                      highlightOrderId: widget.highlightOrderId, // ✅ Pass ID
                     ),
                     _OrderList(
-                      orders: _filterOrders(allOrders, 'active'),
+                      controller:
+                          widget.initialIndex == 1 ? _scrollController : null,
+                      orders: activeList,
                       emptyMsg: "No active orders",
                       tabType: 'active',
                       onStatusUpdate: _updateStatus,
                       onRefresh: _triggerRefresh,
+                      highlightOrderId: widget.highlightOrderId, // ✅ Pass ID
                     ),
                     _OrderList(
-                      orders: _filterOrders(allOrders, 'history'),
+                      controller:
+                          widget.initialIndex == 2 ? _scrollController : null,
+                      orders: historyList,
                       emptyMsg: "No past orders",
                       tabType: 'history',
                       onStatusUpdate: _updateStatus,
                       onRefresh: _triggerRefresh,
+                      highlightOrderId: widget.highlightOrderId, // ✅ Pass ID
                     ),
                   ],
                 );
@@ -188,6 +252,8 @@ class _OrderList extends StatelessWidget {
   final String tabType;
   final Future<bool> Function(dynamic, String) onStatusUpdate;
   final VoidCallback onRefresh;
+  final ScrollController? controller; // ✅ Added
+  final String? highlightOrderId; // ✅ Added
 
   const _OrderList({
     required this.orders,
@@ -195,6 +261,8 @@ class _OrderList extends StatelessWidget {
     required this.tabType,
     required this.onStatusUpdate,
     required this.onRefresh,
+    this.controller,
+    this.highlightOrderId,
   });
 
   @override
@@ -245,15 +313,21 @@ class _OrderList extends StatelessWidget {
         await Future.delayed(const Duration(milliseconds: 500));
       },
       child: ListView.separated(
+        controller: controller, // ✅ Attach Controller
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
         itemCount: orders.length,
         separatorBuilder: (_, __) => const SizedBox(height: 15),
         itemBuilder: (context, index) {
+          final order = orders[index];
+          // ✅ Check for Highlight
+          final bool isHighlighted = order['id'].toString() == highlightOrderId;
+
           return _FarmerOrderCard(
-            order: orders[index],
+            order: order,
             tabType: tabType,
             onStatusUpdate: onStatusUpdate,
-            onNavigateBack: onRefresh, // ✅ Refresh on return
+            onNavigateBack: onRefresh,
+            isHighlighted: isHighlighted, // ✅ Pass highlight status
           );
         },
       ),
@@ -266,6 +340,7 @@ class _FarmerOrderCard extends StatefulWidget {
   final String tabType;
   final Future<bool> Function(dynamic, String) onStatusUpdate;
   final VoidCallback onNavigateBack;
+  final bool isHighlighted; // ✅ Added
 
   const _FarmerOrderCard({
     super.key,
@@ -273,6 +348,7 @@ class _FarmerOrderCard extends StatefulWidget {
     required this.tabType,
     required this.onStatusUpdate,
     required this.onNavigateBack,
+    this.isHighlighted = false, // ✅ Default false
   });
 
   @override
@@ -283,7 +359,6 @@ class _FarmerOrderCardState extends State<_FarmerOrderCard> {
   bool _isAccepting = false;
   bool _isRejecting = false;
 
-  // ✅ New Fetcher to get Image URL since Stream doesn't include it
   Future<String?> _fetchCropImage(String cropId) async {
     try {
       final response = await Supabase.instance.client
@@ -308,7 +383,6 @@ class _FarmerOrderCardState extends State<_FarmerOrderCard> {
         .format(DateTime.parse(order['created_at']).toLocal());
     final buyerName = order['buyer_name'] ?? "Buyer";
 
-    // ✅ Fix: Get crop_id to fetch image
     final cropId = order['crop_id'].toString();
     final cropName = order['crop_name'] ?? "Crop";
 
@@ -322,10 +396,15 @@ class _FarmerOrderCardState extends State<_FarmerOrderCard> {
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.grey.shade100),
+        // ✅ VISUAL HIGHLIGHT: Thicker Green Border if matched
+        border: widget.isHighlighted
+            ? Border.all(color: const Color(0xFF1B5E20), width: 2.5)
+            : Border.all(color: Colors.grey.shade100),
         boxShadow: [
           BoxShadow(
-              color: Colors.grey.shade200,
+              color: widget.isHighlighted
+                  ? const Color(0xFF1B5E20).withOpacity(0.15)
+                  : Colors.grey.shade200,
               blurRadius: 10,
               offset: const Offset(0, 4))
         ],
@@ -337,7 +416,7 @@ class _FarmerOrderCardState extends State<_FarmerOrderCard> {
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // ✅ IMAGE FIX: Bigger Images (90x90)
+                // Image
                 FutureBuilder<String?>(
                   future: _fetchCropImage(cropId),
                   builder: (context, snapshot) {
@@ -361,8 +440,8 @@ class _FarmerOrderCardState extends State<_FarmerOrderCard> {
                     }
 
                     return Container(
-                      height: 90, // ✅ Increased Size
-                      width: 90, // ✅ Increased Size
+                      height: 90,
+                      width: 90,
                       decoration: BoxDecoration(
                         color: Colors.grey[100],
                         borderRadius: BorderRadius.circular(12),
@@ -511,7 +590,7 @@ class _FarmerOrderCardState extends State<_FarmerOrderCard> {
                           MaterialPageRoute(
                               builder: (_) => FarmerOrderDetailScreen(
                                   orderId: order['id'].toString())));
-                      widget.onNavigateBack(); // ✅ Refresh list on return
+                      widget.onNavigateBack();
                     },
                     style: ElevatedButton.styleFrom(
                         backgroundColor: Colors.blue[700],
@@ -536,7 +615,7 @@ class _FarmerOrderCardState extends State<_FarmerOrderCard> {
                           MaterialPageRoute(
                               builder: (_) => FarmerOrderDetailScreen(
                                   orderId: order['id'].toString())));
-                      widget.onNavigateBack(); // ✅ Refresh on return
+                      widget.onNavigateBack();
                     },
                     style: OutlinedButton.styleFrom(
                         shape: RoundedRectangleBorder(

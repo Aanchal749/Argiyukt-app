@@ -2,7 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:google_fonts/google_fonts.dart';
 
-// ✅ RELATIVE SCREEN IMPORTS
+// ✅ IMPORT CORE NOTIFICATION SERVICE (For Real-time Popups)
+import 'package:agriyukt_app/core/services/notification_service.dart';
+
+// ✅ RELATIVE SCREEN IMPORTS (Ensure these files exist)
 import 'inspector_home_tab.dart';
 import 'inspector_add_crop_tab.dart';
 import 'inspector_orders_tab.dart';
@@ -43,10 +46,25 @@ class _InspectorLayoutState extends State<InspectorLayout> {
   @override
   void initState() {
     super.initState();
+
+    // 1. Check for unread notifications (Red Dot Logic)
     _checkNotifications();
+
+    // 2. ✅ CRITICAL: Start listening for Real-Time Order Notifications (Popup Logic)
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      print("🚀 Inspector Layout: Starting Notification Listener...");
+      NotificationService().listenToOrders(context);
+    });
   }
 
-  // --- CHECK NOTIFICATIONS LOGIC ---
+  @override
+  void dispose() {
+    // ✅ NEW: Stop listening to save resources when Inspector leaves
+    NotificationService().stopListening();
+    super.dispose();
+  }
+
+  // --- CHECK NOTIFICATIONS (RED DOT) ---
   Future<void> _checkNotifications() async {
     try {
       final user = _supabase.auth.currentUser;
@@ -57,9 +75,13 @@ class _InspectorLayoutState extends State<InspectorLayout> {
             .eq('user_id', user.id)
             .eq('is_read', false);
 
-        if (mounted) setState(() => _hasUnreadNotifications = count > 0);
+        if (mounted) {
+          setState(() => _hasUnreadNotifications = count > 0);
+        }
       }
-    } catch (_) {}
+    } catch (e) {
+      print("⚠️ Error checking notifications: $e");
+    }
   }
 
   void _switchTab(int index) {
@@ -100,8 +122,10 @@ class _InspectorLayoutState extends State<InspectorLayout> {
                 icon:
                     const Icon(Icons.notifications_active, color: Colors.white),
                 onPressed: () {
+                  // Clear the red dot immediately when clicked
                   setState(() => _hasUnreadNotifications = false);
-                  // ✅ Navigates to the Inspector Notification Screen
+
+                  // ✅ Navigates to the Inspector Notification Screen (History List)
                   Navigator.push(
                       context,
                       MaterialPageRoute(
@@ -128,7 +152,7 @@ class _InspectorLayoutState extends State<InspectorLayout> {
         ],
       ),
 
-      // ✅ State Preservation
+      // ✅ State Preservation (IndexedStack keeps tabs alive)
       body: IndexedStack(
         index: _currentIndex,
         children: _screens,

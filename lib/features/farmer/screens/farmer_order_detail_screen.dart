@@ -1,22 +1,24 @@
 import 'dart:async';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:intl/intl.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:google_fonts/google_fonts.dart';
-import 'package:provider/provider.dart'; // ✅ Added for Localization
+
+// ✅ Logic Imports
 import 'package:agriyukt_app/features/common/screens/chat_screen.dart';
 import 'full_screen_tracking.dart';
 
-// ✅ LOCALIZATION IMPORTS
+// ✅ Localization
 import 'package:agriyukt_app/features/farmer/farmer_translations.dart';
-import 'package:agriyukt_app/core/services/translation_service.dart';
 import 'package:agriyukt_app/core/providers/language_provider.dart';
 
 class FarmerOrderDetailScreen extends StatefulWidget {
-  final String orderId;
-  const FarmerOrderDetailScreen({super.key, required this.orderId});
+  final Map<String, dynamic>? order;
+  final String? orderId;
+
+  const FarmerOrderDetailScreen({super.key, this.order, this.orderId});
 
   @override
   State<FarmerOrderDetailScreen> createState() =>
@@ -28,7 +30,12 @@ class _FarmerOrderDetailScreenState extends State<FarmerOrderDetailScreen> {
   bool _isLoading = true;
   bool _isUpdating = false;
   Map<String, dynamic>? _order;
-  final TextEditingController _otpController = TextEditingController();
+
+  // ✅ VISUALS: Exact Colors from Buyer Screen
+  final Color _primaryGreen = const Color(0xFF2E7D32);
+  final Color _bgGrey = const Color(0xFFF4F7F6);
+  final Color _textDark = const Color(0xFF1A1A1A);
+  final Color _textGrey = const Color(0xFF757575);
 
   @override
   void initState() {
@@ -36,23 +43,19 @@ class _FarmerOrderDetailScreenState extends State<FarmerOrderDetailScreen> {
     _fetchOrderDetails();
   }
 
-  @override
-  void dispose() {
-    _otpController.dispose();
-    super.dispose();
-  }
-
-  // ✅ Helper for Localized Text
   String _text(String key) => FarmerText.get(context, key);
 
   Future<void> _fetchOrderDetails() async {
+    final idToFetch = widget.orderId ?? widget.order?['id'];
+    if (idToFetch == null) return;
+
     try {
       final data = await _supabase.from('orders').select('''
               *,
               buyer:profiles!buyer_id(id, first_name, last_name, phone, district, state),
               farmer:profiles!farmer_id(latitude, longitude),
-              crop:crops!crop_id(image_url, crop_name)
-          ''').eq('id', widget.orderId).single();
+              crop:crops!crop_id(image_url, crop_name, variety, harvest_date, unit, grade, price) 
+          ''').eq('id', idToFetch).single();
 
       if (mounted) {
         setState(() {
@@ -61,656 +64,650 @@ class _FarmerOrderDetailScreenState extends State<FarmerOrderDetailScreen> {
         });
       }
     } catch (e) {
-      debugPrint("Error fetching: $e");
-      if (mounted) {
-        try {
-          final simpleData = await _supabase
-              .from('orders')
-              .select()
-              .eq('id', widget.orderId)
-              .single();
-          setState(() {
-            _order = simpleData;
-            _isLoading = false;
-          });
-        } catch (e2) {
-          setState(() => _isLoading = false);
-        }
-      }
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
   Future<void> _updateStatus(String newStatus) async {
-    // 1. Calculate the new main status
     String mainStatus = (newStatus == 'Rejected')
         ? 'Rejected'
         : (newStatus == 'Completed' ? 'Completed' : 'Accepted');
 
-    // 2. OPTIMISTIC UPDATE: Update UI Immediately!
-    setState(() {
-      _isUpdating = true;
-      if (_order != null) {
-        _order!['status'] = mainStatus;
-        _order!['tracking_status'] = newStatus;
-        if (newStatus == 'Completed') {
-          _order!['is_sharing_location'] = false;
-        }
-      }
-    });
+    setState(() => _isUpdating = true);
 
     try {
-      // 3. Perform DB Update in Background
-      // 👉 STOCK UPDATION LOGIC HAPPENS HERE VIA DB TRIGGER
-      // If stock is insufficient, this line will throw an error
       await _supabase.from('orders').update({
         'status': mainStatus,
         'tracking_status': newStatus,
         if (newStatus == 'Completed') 'is_sharing_location': false
-      }).eq('id', widget.orderId);
+      }).eq('id', _order!['id']);
 
       if (mounted) {
-        // 4. Show Success
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text("${_text('status_updated')}: $newStatus",
-                style: GoogleFonts.poppins()),
-            backgroundColor: Colors.green));
-
-        // 5. Fetch fresh data just to be safe
-        await _fetchOrderDetails();
+            content: Text("${_text('status_updated')}: $newStatus"),
+            backgroundColor: _primaryGreen));
+        _fetchOrderDetails();
       }
     } catch (e) {
-      debugPrint("Update Error: $e");
-
-      // 👉 STOCK ERROR HANDLING: If DB refuses due to low stock, revert UI & Alert User
-      if (mounted) {
-        String errorMsg = "Update failed. Please check connection.";
-        if (e.toString().contains("Insufficient Stock") ||
-            e.toString().contains("insufficient stock")) {
-          errorMsg = "Cannot Accept: Insufficient Stock in Inventory!";
-        }
-
-        showDialog(
-          context: context,
-          builder: (ctx) => AlertDialog(
-            title: const Text("Action Failed",
-                style: TextStyle(color: Colors.red)),
-            content: Text(errorMsg),
-            actions: [
-              TextButton(
-                  onPressed: () => Navigator.pop(ctx), child: const Text("OK"))
-            ],
-          ),
-        );
-      }
-
-      // Revert changes by re-fetching
-      _fetchOrderDetails();
+      if (mounted) _fetchOrderDetails();
     } finally {
       if (mounted) setState(() => _isUpdating = false);
     }
   }
 
-  void _showOtpDialog() {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(_text('verify_delivery_title'), // ✅ LOCALIZED
-            style: GoogleFonts.poppins(fontWeight: FontWeight.bold)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(_text('otp_instruction'), // ✅ LOCALIZED
-                style: GoogleFonts.poppins()),
-            const SizedBox(height: 20),
-            TextField(
-              controller: _otpController,
-              keyboardType: TextInputType.number,
-              maxLength: 4,
-              textAlign: TextAlign.center,
-              style: GoogleFonts.poppins(
-                  fontSize: 24, letterSpacing: 8, fontWeight: FontWeight.bold),
-              decoration: const InputDecoration(
-                  hintText: "0000",
-                  counterText: "",
-                  border: OutlineInputBorder()),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: Text(_text('cancel'))), // ✅ LOCALIZED
-          ElevatedButton(
-            onPressed: () {
-              Navigator.pop(ctx);
-              _verifyOtp();
-            },
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
-            child: Text(_text('verify'), // ✅ LOCALIZED
-                style: const TextStyle(color: Colors.white)),
-          )
-        ],
-      ),
-    );
-  }
-
-  void _verifyOtp() {
-    final String expectedOtp =
-        (widget.orderId.hashCode.abs() % 9000 + 1000).toString();
-    if (_otpController.text.trim() == expectedOtp) {
-      _updateStatus('Completed');
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text("❌ ${_text('incorrect_otp')}"), // ✅ LOCALIZED
-          backgroundColor: Colors.red));
-    }
-    _otpController.clear();
-  }
-
+  // --- UI BUILD ---
   @override
   Widget build(BuildContext context) {
-    // Listen to language changes
-    final langCode =
-        Provider.of<LanguageProvider>(context).appLocale.languageCode;
-
-    if (_isLoading)
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
-    if (_order == null)
+    if (_isLoading) {
       return Scaffold(
-          body: Center(child: Text(_text('order_not_found')))); // ✅ LOCALIZED
+          backgroundColor: _bgGrey,
+          body: const Center(child: CircularProgressIndicator()));
+    }
+    if (_order == null) {
+      return const Scaffold(body: Center(child: Text("Order Not Found")));
+    }
 
+    // Parsing Data
     final buyer = _order!['buyer'] ?? {};
     final farmer = _order!['farmer'] ?? {};
-    final buyerName =
-        "${buyer['first_name'] ?? 'Buyer'} ${buyer['last_name'] ?? ''}".trim();
-    final buyerLoc = "${buyer['district'] ?? ''}, ${buyer['state'] ?? ''}";
-    final crop = _order!['crop'];
-    String cropName =
-        crop?['crop_name'] ?? _order!['crop_name'] ?? "Unknown Crop";
-    String? imgUrl = crop?['image_url'];
+    final crop = _order!['crop'] ?? {};
 
-    // ✅ ROBUST IMAGE LOGIC (Copied from OrdersScreen)
+    // ✅ Buyer Info logic
+    final String buyerName =
+        "${buyer['first_name'] ?? 'Buyer'} ${buyer['last_name'] ?? ''}".trim();
+
+    String dist = buyer['district'] ?? '';
+    String st = buyer['state'] ?? '';
+    String buyerLoc = "";
+    if (dist.isNotEmpty && st.isNotEmpty) {
+      buyerLoc = "$dist, $st";
+    } else if (dist.isNotEmpty) {
+      buyerLoc = dist;
+    } else {
+      buyerLoc = "Location N/A";
+    }
+
+    final String buyerId = buyer['id'] ?? '';
+
+    // Crop Info (detailed)
+    String cropName = crop['crop_name'] ?? _order!['crop_name'] ?? "Crop";
+    String variety = crop['variety'] ?? 'Standard';
+    if (variety.toLowerCase().contains('premium')) variety = 'Prem';
+    String grade = crop['grade'] ?? 'Standard';
+    String unit = crop['unit'] ?? 'Kg';
+
+    // Price per unit
+    double pricePerUnit =
+        (double.tryParse(_order!['price_offered']?.toString() ?? "0") ??
+            (crop['price'] ?? 0).toDouble());
+
+    String dateText = "Available";
+    if (crop['harvest_date'] != null) {
+      try {
+        dateText =
+            DateFormat('dd MMM').format(DateTime.parse(crop['harvest_date']));
+      } catch (_) {}
+    }
+
+    // Image Logic
+    String? rawImgUrl = crop['image_url'];
     ImageProvider imgProvider;
-    if (imgUrl != null && imgUrl.isNotEmpty) {
-      if (imgUrl.startsWith('http')) {
-        imgProvider = NetworkImage(imgUrl);
+    if (rawImgUrl != null && rawImgUrl.isNotEmpty) {
+      if (rawImgUrl.startsWith('http')) {
+        imgProvider = NetworkImage(rawImgUrl);
       } else {
-        try {
-          final fullUrl =
-              _supabase.storage.from('crop_images').getPublicUrl(imgUrl);
-          imgProvider = NetworkImage(fullUrl);
-        } catch (e) {
-          imgProvider = const AssetImage('assets/images/placeholder_crop.png');
-        }
+        imgProvider = NetworkImage(
+            _supabase.storage.from('crop_images').getPublicUrl(rawImgUrl));
       }
     } else {
       imgProvider = const AssetImage('assets/images/placeholder_crop.png');
     }
 
-    final status = _order!['tracking_status'] ?? _order!['status'] ?? 'Pending';
-    final quantity = (_order!['quantity_kg'] ?? 0).toDouble();
-    final price = (_order!['price_offered'] ?? 0).toDouble();
-    final totalAmount = quantity * price;
+    // Money
+    final double qty =
+        (double.tryParse(_order!['quantity_kg']?.toString() ?? "0") ?? 0);
+    final double totalAmount = qty * pricePerUnit;
+    final double paidAmount =
+        (double.tryParse(_order!['advance_amount']?.toString() ?? "0") ?? 0);
 
+    // Tracking
+    final double fLat = (farmer['latitude'] as num?)?.toDouble() ?? 0.0;
+    final double fLng = (farmer['longitude'] as num?)?.toDouble() ?? 0.0;
+    final double bLat = (_order!['buyer_lat'] as num?)?.toDouble() ?? 0.0;
+    final double bLng = (_order!['buyer_lng'] as num?)?.toDouble() ?? 0.0;
+    final bool isSharing = _order!['is_sharing_location'] ?? false;
+
+    final status = _order!['tracking_status'] ?? _order!['status'] ?? 'Pending';
     final scheduleText = _order!['scheduled_pickup_time'] != null
         ? DateFormat('dd MMM, hh:mm a')
             .format(DateTime.parse(_order!['scheduled_pickup_time']).toLocal())
-        : _text('not_scheduled'); // ✅ LOCALIZED
+        : "Not Scheduled";
 
-    // Action Button Logic
-    String btnText = _text('order_completed_btn'); // ✅ LOCALIZED
-    Color btnColor = Colors.grey;
-    VoidCallback? btnAction;
-    if (status == 'Pending' || status == 'Ordered') {
-      btnText = _text('accept'); // ✅ LOCALIZED
-      btnAction = () => _updateStatus('Accepted');
-      btnColor = Colors.blue;
-    } else if (status == 'Accepted') {
-      btnText = _text('mark_packed'); // ✅ LOCALIZED
-      btnAction = () => _updateStatus('Packed');
-      btnColor = Colors.orange;
-    } else if (status == 'Packed') {
-      btnText = _text('start_shipping'); // ✅ LOCALIZED
-      btnAction = () => _updateStatus('Shipped');
-      btnColor = Colors.deepOrange;
-    } else if (status == 'Shipped' || status == 'In Transit') {
-      btnText = _text('verify_delivery_btn'); // ✅ LOCALIZED
-      btnAction = _showOtpDialog;
-      btnColor = Colors.green;
-    }
+    // Dynamic padding setup based on status buttons rendering height
+    final double bottomSafeArea = MediaQuery.of(context).padding.bottom;
+    final double scrollPadding =
+        (status == 'Pending' || status == 'Ordered') ? 200 : 140;
 
     return Scaffold(
-      backgroundColor: const Color(0xFFF5F7FA),
+      backgroundColor: _bgGrey,
       appBar: AppBar(
-        title: Column(children: [
-          Text(_text('manage_order'), // ✅ LOCALIZED
-              style: GoogleFonts.poppins(
-                  color: Colors.black, fontWeight: FontWeight.bold)),
-          Text(
-              "${_text('order')} #${widget.orderId.substring(0, 5).toUpperCase()}", // ✅ LOCALIZED
-              style: GoogleFonts.poppins(color: Colors.grey, fontSize: 12)),
-        ]),
-        backgroundColor: Colors.white,
+        title: Text(_text('manage_order'),
+            style: GoogleFonts.poppins(
+                color: _textDark, fontWeight: FontWeight.bold)),
+        backgroundColor: _bgGrey,
         elevation: 0,
         centerTitle: true,
+        leading: IconButton(
+            icon: const Icon(Icons.arrow_back, color: Colors.black),
+            onPressed: () => Navigator.pop(context)),
       ),
       body: SafeArea(
         child: Stack(
           children: [
             SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(
-                  16, 10, 16, 120), // Increased bottom padding for floating bar
+              padding:
+                  EdgeInsets.fromLTRB(0, 10, 0, scrollPadding + bottomSafeArea),
               child: Column(
                 children: [
-                  _buildCropHeader(
-                      imgProvider, cropName, totalAmount, status, langCode),
-                  const SizedBox(height: 16),
-                  _buildBreakdownCard(quantity, totalAmount),
-                  const SizedBox(height: 16),
-                  StreamBuilder<List<Map<String, dynamic>>>(
-                    stream: _supabase
-                        .from('orders')
-                        .stream(primaryKey: ['id']).eq('id', widget.orderId),
-                    builder: (context, snapshot) {
-                      final orderData =
-                          (snapshot.hasData && snapshot.data!.isNotEmpty)
-                              ? snapshot.data!.first
-                              : _order!;
-                      final isSharing =
-                          orderData['is_sharing_location'] ?? false;
-                      final double fLat =
-                          (farmer['latitude'] as num?)?.toDouble() ?? 0.0;
-                      final double fLng =
-                          (farmer['longitude'] as num?)?.toDouble() ?? 0.0;
-                      final double? bLat =
-                          (orderData['buyer_lat'] as num?)?.toDouble();
-                      final double? bLng =
-                          (orderData['buyer_lng'] as num?)?.toDouble();
+                  // 1. PRODUCT CARD
+                  _buildProductCard(cropName, variety, grade, dateText,
+                      pricePerUnit, unit, status, imgProvider),
+                  const SizedBox(height: 12),
 
-                      return Container(
-                        padding: const EdgeInsets.all(20),
-                        decoration: BoxDecoration(
-                            color: Colors.white,
-                            borderRadius: BorderRadius.circular(20)),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(children: [
-                              const Icon(Icons.calendar_month,
-                                  color: Colors.blue),
-                              const SizedBox(width: 12),
-                              // ✅ FIXED: Wrapped in Expanded to prevent horizontal overflow
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                        _text(
-                                            'scheduled_pickup'), // ✅ LOCALIZED
-                                        style: GoogleFonts.poppins(
-                                            color: Colors.grey, fontSize: 12)),
-                                    Text(scheduleText,
-                                        style: GoogleFonts.poppins(
-                                            fontWeight: FontWeight.bold,
-                                            fontSize: 14),
-                                        overflow: TextOverflow.ellipsis),
-                                  ],
-                                ),
-                              ),
-                            ]),
-                            const SizedBox(height: 20),
-                            _buildCustomTimeline(status),
-                            const SizedBox(height: 20),
+                  // 2. BREAKDOWN CARD
+                  _buildBreakdownCard(qty, unit, totalAmount, paidAmount),
+                  const SizedBox(height: 12),
 
-                            // Map Preview
-                            GestureDetector(
-                              onTap: () => Navigator.push(
-                                  context,
-                                  MaterialPageRoute(
-                                      builder: (_) => FullScreenTracking(
-                                          orderId: widget.orderId))),
-                              child: Container(
-                                height: 120,
-                                width: double.infinity,
-                                decoration: BoxDecoration(
-                                    color: const Color(0xFFE8F5E9)
-                                        .withOpacity(0.5),
-                                    borderRadius: BorderRadius.circular(12),
-                                    border: Border.all(
-                                        color: Colors.grey.shade300)),
-                                child: Stack(children: [
-                                  Positioned.fill(
-                                      child: CustomPaint(
-                                          painter: _CurveRoutePainter())),
-                                  Positioned(
-                                      left: 20,
-                                      bottom: 30,
-                                      child: _MapMarker(
-                                          label: _text('farm'), // ✅ LOCALIZED
-                                          icon: Icons.store,
-                                          color: Colors.brown)),
-                                  Positioned(
-                                      right: 20,
-                                      top: 30,
-                                      child: _MapMarker(
-                                          label: _text('buyer'), // ✅ LOCALIZED
-                                          icon: Icons.person_pin_circle,
-                                          color: Colors.orange)),
-                                  if (isSharing && bLat != null && bLng != null)
-                                    Builder(builder: (context) {
-                                      double dist = Geolocator.distanceBetween(
-                                          fLat, fLng, bLat, bLng);
-                                      double prog =
-                                          (1.0 - (dist / 5000)).clamp(0.0, 1.0);
-                                      return AnimatedAlign(
-                                        duration: const Duration(seconds: 1),
-                                        alignment: Alignment(
-                                            ui.lerpDouble(-0.8, 0.8, prog)!,
-                                            ui.lerpDouble(0.5, -0.5, prog)!),
-                                        child: Container(
-                                          padding: const EdgeInsets.all(4),
-                                          decoration: const BoxDecoration(
-                                              color: Colors.white,
-                                              shape: BoxShape.circle),
-                                          child: const Icon(
-                                              Icons.local_shipping,
-                                              color: Colors.blue,
-                                              size: 20),
-                                        ),
-                                      );
-                                    }),
-                                  const Positioned(
-                                      right: 10,
-                                      bottom: 10,
-                                      child: Icon(Icons.fullscreen,
-                                          size: 18, color: Colors.grey)),
-                                ]),
-                              ),
-                            ),
-                          ],
-                        ),
-                      );
-                    },
-                  ),
-                  const SizedBox(height: 16),
-                  _buildBuyerInfoCard(buyerName, buyerLoc, status, cropName,
-                      _order!['buyer_id']),
+                  // 3. SCHEDULE CARD
+                  _buildScheduleCard(scheduleText),
+                  const SizedBox(height: 12),
+
+                  // 4. TRACKING/MAP CARD
+                  _buildTrackingBlock(
+                      status, isSharing, fLat, fLng, bLat, bLng, scheduleText),
+                  const SizedBox(height: 12),
+
+                  // ✅ 5. CONTACT CARD (Call button removed)
+                  _buildContactCard("Buyer", buyerName, buyerLoc, status,
+                      cropName, buyerId, Colors.blue.shade100),
                 ],
               ),
             ),
 
-            // Bottom Action Bar
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 0,
-              child: Container(
-                padding: const EdgeInsets.all(20),
-                decoration: const BoxDecoration(
-                    color: Colors.white,
-                    borderRadius:
-                        BorderRadius.vertical(top: Radius.circular(20)),
-                    boxShadow: [
-                      BoxShadow(color: Colors.black12, blurRadius: 10)
-                    ]),
-                child: status == 'Pending'
-                    ? _buildAcceptRejectRow()
-                    : _buildStatusActionButton(btnColor, btnAction, btnText),
-              ),
-            ),
+            // ✅ BOTTOM ACTION BAR
+            _buildBottomPanel(status, bottomSafeArea),
           ],
         ),
       ),
     );
   }
 
-  // --- HELPERS ---
+  // --- WIDGETS ---
 
-  Widget _buildCropHeader(ImageProvider img, String name, double amount,
-      String status, String langCode) {
+  // ✅ Enhanced product card with price, variety, grade, harvest
+  Widget _buildProductCard(
+      String name,
+      String variety,
+      String grade,
+      String date,
+      double pricePerUnit,
+      String unit,
+      String status,
+      ImageProvider img) {
     return Container(
-      padding: const EdgeInsets.all(16),
+      width: double.infinity,
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      padding: const EdgeInsets.all(24),
       decoration: BoxDecoration(
-          color: Colors.white, borderRadius: BorderRadius.circular(20)),
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(20),
+          boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 5)]),
       child: Row(children: [
         ClipRRect(
-            borderRadius: BorderRadius.circular(12),
+            borderRadius: BorderRadius.circular(16),
             child: SizedBox(
-                height: 70,
-                width: 70,
+                height: 110,
+                width: 110,
                 child: Image(image: img, fit: BoxFit.cover))),
-        const SizedBox(width: 12),
-        // ✅ Keep Expanded
-        Expanded(
-          child:
-              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            // ✅ DYNAMIC TRANSLATION for Crop Name
-            FutureBuilder<String>(
-              future: TranslationService.toLocal(name, langCode),
-              initialData: name,
-              builder: (context, snapshot) => Text(
-                snapshot.data ?? name,
-                style: GoogleFonts.poppins(
-                    fontSize: 18, fontWeight: FontWeight.bold),
-                overflow: TextOverflow.ellipsis,
-                maxLines: 1,
-              ),
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                _buildTag("₹${NumberFormat('#,##0').format(amount)}",
-                    Colors.orange.shade50, Colors.orange.shade800),
-                // ✅ DYNAMIC TRANSLATION for Status
-                FutureBuilder<String>(
-                  future: TranslationService.toLocal(status, langCode),
-                  initialData: status,
-                  builder: (context, snapshot) =>
-                      _buildStatusBadge(snapshot.data ?? status),
-                ),
-              ],
-            )
-          ]),
-        )
-      ]),
-    );
-  }
-
-  Widget _buildBreakdownCard(double qty, double total) {
-    return Container(
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-          color: Colors.white, borderRadius: BorderRadius.circular(20)),
-      child: Column(children: [
-        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-          Text(_text('quantity'), // ✅ LOCALIZED "Total Quantity"
-              style: GoogleFonts.poppins(
-                  color: Colors.grey, fontWeight: FontWeight.w600)),
-          Text("$qty ${_text('kg')}", // ✅ LOCALIZED "Kg"
-              style: GoogleFonts.poppins(fontWeight: FontWeight.bold))
-        ]),
-        const Divider(height: 24),
-        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-          Text(_text('total'), // ✅ LOCALIZED "Total Price"
-              style: GoogleFonts.poppins(
-                  color: Colors.grey, fontWeight: FontWeight.w600)),
-          Text("₹${NumberFormat('#,##0').format(total)}",
-              style: GoogleFonts.poppins(
-                  fontWeight: FontWeight.bold, fontSize: 18)),
-        ]),
-      ]),
-    );
-  }
-
-  Widget _buildBuyerInfoCard(
-      String name, String loc, String status, String crop, String buyerId) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-          color: Colors.white, borderRadius: BorderRadius.circular(20)),
-      child: Row(children: [
-        CircleAvatar(
-            radius: 20,
-            backgroundColor: Colors.blue.shade50,
-            child: Text(name.isNotEmpty ? name[0] : "B",
-                style: GoogleFonts.poppins(
-                    color: Colors.blue.shade800, fontWeight: FontWeight.bold))),
-        const SizedBox(width: 12),
+        const SizedBox(width: 20),
         Expanded(
             child:
                 Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text(name,
-              style: GoogleFonts.poppins(
-                  fontWeight: FontWeight.bold, fontSize: 15),
-              overflow: TextOverflow.ellipsis),
-          Text("${_text('buyer')} • $loc", // ✅ LOCALIZED "Buyer"
-              style: GoogleFonts.poppins(color: Colors.grey[600], fontSize: 11),
-              overflow: TextOverflow.ellipsis),
-        ])),
-        IconButton(
-          onPressed: () => Navigator.push(
-              context,
-              MaterialPageRoute(
-                  builder: (_) => ChatScreen(
-                      targetUserId: buyerId,
-                      targetName: name,
-                      orderId: widget.orderId,
-                      cropName: crop,
-                      orderStatus: status))),
-          icon: const Icon(Icons.chat_bubble_outline, size: 20),
-        )
+              style:
+                  const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 6),
+          Text("$variety • $grade",
+              style: TextStyle(color: Colors.grey[700], fontSize: 13)),
+          Text("Harvest: $date",
+              style: TextStyle(color: Colors.grey[700], fontSize: 13)),
+          const SizedBox(height: 10),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Flexible(
+                child: Text(
+                  "₹${pricePerUnit.toStringAsFixed(0)} / $unit",
+                  style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: _primaryGreen),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              _buildStatusBadge(status)
+            ],
+          )
+        ]))
       ]),
     );
   }
 
-  Widget _buildAcceptRejectRow() {
-    return Row(children: [
-      Expanded(
+  Widget _buildBreakdownCard(
+      double qty, String unit, double total, double paid) {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: Colors.grey.shade200)),
+      child: Column(children: [
+        _row(_text('quantity'), "$qty $unit"),
+        const SizedBox(height: 8),
+        _row(_text('total'), "₹${NumberFormat('#,##0').format(total)}",
+            isBold: true),
+        const Divider(height: 24),
+        _row("Paid", "₹${NumberFormat('#,##0').format(paid)}",
+            color: Colors.green),
+        const SizedBox(height: 8),
+        _row("Pending", "₹${NumberFormat('#,##0').format(total - paid)}",
+            color: Colors.orange),
+      ]),
+    );
+  }
+
+  Widget _row(String label, String val, {bool isBold = false, Color? color}) {
+    return Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+      Text(label, style: GoogleFonts.poppins(color: _textGrey)),
+      Flexible(
+          child: Text(val,
+              style: GoogleFonts.poppins(
+                  fontWeight: isBold ? FontWeight.bold : FontWeight.w600,
+                  fontSize: 15,
+                  color: color ?? Colors.black),
+              overflow: TextOverflow.ellipsis))
+    ]);
+  }
+
+  Widget _buildScheduleCard(String text) {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+      decoration: BoxDecoration(
+          color: Colors.blue[50],
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: Colors.blue.shade100)),
+      child: Row(children: [
+        const Icon(Icons.calendar_month, color: Colors.blue),
+        const SizedBox(width: 16),
+        Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text("Scheduled Pickup",
+              style:
+                  TextStyle(color: Colors.blue, fontWeight: FontWeight.bold)),
+          Text(text,
+              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16))
+        ]),
+      ]),
+    );
+  }
+
+  Widget _buildTrackingBlock(String status, bool sharing, double fLat,
+      double fLng, double bLat, double bLng, String schedule) {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(20),
+          boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 5)]),
+      child: Column(children: [
+        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+          Text("Shipment Status",
+              style: GoogleFonts.poppins(
+                  fontWeight: FontWeight.bold, fontSize: 16)),
+          if (sharing) _buildLiveBadge(),
+        ]),
+        const SizedBox(height: 20),
+        _buildCustomTimeline(status),
+        const SizedBox(height: 20),
+        GestureDetector(
+          onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                  builder: (_) =>
+                      FullScreenTracking(orderId: _order!['id'].toString()))),
+          child: Container(
+            height: 120,
+            width: double.infinity,
+            decoration: BoxDecoration(
+                color: const Color(0xFFEDF2F7),
+                borderRadius: BorderRadius.circular(15),
+                border: Border.all(color: Colors.grey.shade300)),
+            child: Stack(children: [
+              Positioned.fill(child: CustomPaint(painter: _RoutePainter())),
+              const Positioned(
+                  left: 20,
+                  bottom: 40,
+                  child: _MapMarker(
+                      label: "Farm", icon: Icons.store, color: Colors.brown)),
+              if (bLat != 0) _buildAnimatedTruck(fLat, fLng, bLat, bLng),
+              const Positioned(
+                  right: 10,
+                  bottom: 10,
+                  child: Icon(Icons.fullscreen, size: 20, color: Colors.grey)),
+            ]),
+          ),
+        ),
+      ]),
+    );
+  }
+
+  // ✅ Clean Contact Card Setup (No Call Icon)
+  Widget _buildContactCard(String role, String name, String loc, String status,
+      String crop, String id, Color avatarBg) {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(20),
+          boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 5)]),
+      child: Row(children: [
+        CircleAvatar(
+            radius: 24,
+            backgroundColor: avatarBg,
+            child: Text(name.isNotEmpty ? name[0].toUpperCase() : role[0])),
+        const SizedBox(width: 16),
+        Expanded(
+            child:
+                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(name, style: const TextStyle(fontWeight: FontWeight.bold)),
+          Text("$role • $loc", style: const TextStyle(color: Colors.grey))
+        ])),
+        IconButton.filled(
+            onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                    builder: (_) => ChatScreen(
+                        targetUserId: id,
+                        targetName: name,
+                        orderId: _order!['id'].toString(),
+                        cropName: crop,
+                        orderStatus: status))),
+            style:
+                IconButton.styleFrom(backgroundColor: const Color(0xFF2E7D32)),
+            icon: const Icon(Icons.chat_bubble_outline, color: Colors.white)),
+      ]),
+    );
+  }
+
+  // ✅ BOTTOM PANEL (Flush, Lowered, Full-Width workflow)
+  Widget _buildBottomPanel(String status, double bottomPadding) {
+    List<Widget> buttons = [];
+
+    // Stage 1: Accept or Reject
+    if (status == 'Pending' || status == 'Ordered') {
+      buttons = [
+        SizedBox(
+          width: double.infinity,
+          height: 54,
+          child: ElevatedButton.icon(
+              onPressed: () => _updateStatus('Accepted'),
+              style: ElevatedButton.styleFrom(
+                  backgroundColor: _primaryGreen,
+                  elevation: 4,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(30))),
+              icon: _isUpdating
+                  ? const SizedBox.shrink()
+                  : const Icon(Icons.thumb_up_alt_outlined,
+                      color: Colors.white, size: 20),
+              label: _isUpdating
+                  ? const SizedBox(
+                      height: 24,
+                      width: 24,
+                      child: CircularProgressIndicator(
+                          color: Colors.white, strokeWidth: 2))
+                  : Text(_text('accept').toUpperCase(),
+                      style: GoogleFonts.poppins(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16))),
+        ),
+        const SizedBox(height: 12),
+        SizedBox(
+          width: double.infinity,
+          height: 54,
           child: OutlinedButton(
               onPressed: () => _updateStatus('Rejected'),
               style: OutlinedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 15),
                   side: const BorderSide(color: Colors.red),
                   shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(30))),
-              child: Text(_text('reject'), // ✅ LOCALIZED "Reject"
+              child: Text(_text('reject').toUpperCase(),
                   style: GoogleFonts.poppins(
-                      color: Colors.red, fontWeight: FontWeight.bold)))),
-      const SizedBox(width: 12),
-      Expanded(
-          child: ElevatedButton(
-              onPressed: () => _updateStatus('Accepted'),
+                      color: Colors.red,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16))),
+        ),
+      ];
+    }
+    // Stage 2: Mark Packed
+    else if (status == 'Accepted') {
+      buttons = [
+        SizedBox(
+          width: double.infinity,
+          height: 54,
+          child: ElevatedButton.icon(
+              onPressed: () => _updateStatus('Packed'),
               style: ElevatedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 15),
-                  backgroundColor: const Color(0xFF2E7D32),
+                  backgroundColor: Colors.orange,
+                  elevation: 4,
                   shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(30))),
-              child: Text(_text('accept'), // ✅ LOCALIZED "Accept"
-                  style: GoogleFonts.poppins(
-                      color: Colors.white, fontWeight: FontWeight.bold)))),
-    ]);
-  }
-
-  Widget _buildStatusActionButton(
-      Color color, VoidCallback? action, String text) {
-    return SizedBox(
-        height: 50,
-        width: double.infinity,
-        child: ElevatedButton(
-            onPressed: action,
+              icon: _isUpdating
+                  ? const SizedBox.shrink()
+                  : const Icon(Icons.inventory_2_outlined,
+                      color: Colors.white, size: 20),
+              label: _isUpdating
+                  ? const SizedBox(
+                      height: 24,
+                      width: 24,
+                      child: CircularProgressIndicator(
+                          color: Colors.white, strokeWidth: 2))
+                  : Text("MARK AS PACKED",
+                      style: GoogleFonts.poppins(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16))),
+        ),
+      ];
+    }
+    // Stage 3: Start Shipping
+    else if (status == 'Packed') {
+      buttons = [
+        SizedBox(
+          width: double.infinity,
+          height: 54,
+          child: ElevatedButton.icon(
+              onPressed: () => _updateStatus('Shipped'),
+              style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.blue,
+                  elevation: 4,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(30))),
+              icon: _isUpdating
+                  ? const SizedBox.shrink()
+                  : const Icon(Icons.local_shipping_outlined,
+                      color: Colors.white, size: 20),
+              label: _isUpdating
+                  ? const SizedBox(
+                      height: 24,
+                      width: 24,
+                      child: CircularProgressIndicator(
+                          color: Colors.white, strokeWidth: 2))
+                  : Text("START SHIPPING",
+                      style: GoogleFonts.poppins(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16))),
+        ),
+      ];
+    }
+    // Stage 4: Mark Delivered (Direct completion for farmer)
+    else if (status == 'Shipped' || status == 'In Transit') {
+      buttons = [
+        SizedBox(
+          width: double.infinity,
+          height: 54,
+          child: ElevatedButton.icon(
+              onPressed: () => _updateStatus('Completed'),
+              style: ElevatedButton.styleFrom(
+                  backgroundColor: _primaryGreen,
+                  elevation: 4,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(30))),
+              icon: _isUpdating
+                  ? const SizedBox.shrink()
+                  : const Icon(Icons.done_all, color: Colors.white, size: 20),
+              label: _isUpdating
+                  ? const SizedBox(
+                      height: 24,
+                      width: 24,
+                      child: CircularProgressIndicator(
+                          color: Colors.white, strokeWidth: 2))
+                  : Text("MARK DELIVERED",
+                      style: GoogleFonts.poppins(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16))),
+        ),
+      ];
+    }
+    // Stage 5: Completed or Rejected
+    else {
+      buttons = [
+        SizedBox(
+          width: double.infinity,
+          height: 54,
+          child: ElevatedButton(
+            onPressed: null,
             style: ElevatedButton.styleFrom(
-                backgroundColor: color,
+                backgroundColor: Colors.grey.shade300,
                 shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(30))),
-            child: _isUpdating
-                ? const SizedBox(
-                    height: 20,
-                    width: 20,
-                    child: CircularProgressIndicator(
-                        color: Colors.white, strokeWidth: 2))
-                : Text(text,
-                    style: GoogleFonts.poppins(
-                        color: Colors.white, fontWeight: FontWeight.bold))));
+            child: Text("STATUS: ${status.toUpperCase()}",
+                style: GoogleFonts.poppins(
+                    color: Colors.grey.shade600,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16)),
+          ),
+        ),
+      ];
+    }
+
+    return Positioned(
+      left: 0,
+      right: 0,
+      bottom: 0,
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(20, 16, 20, 12), // ✅ Flush to bottom
+        decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+            boxShadow: [
+              BoxShadow(
+                  color: Colors.black12, blurRadius: 20, offset: Offset(0, -5))
+            ]),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: buttons,
+        ),
+      ),
+    );
   }
 
-  Widget _buildTag(String text, Color bg, Color fg) {
-    return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-        decoration:
-            BoxDecoration(color: bg, borderRadius: BorderRadius.circular(6)),
-        child: Text(text,
-            style: GoogleFonts.poppins(
-                color: fg, fontWeight: FontWeight.bold, fontSize: 11)));
-  }
-
+  // --- Helpers ---
   Widget _buildStatusBadge(String status) {
-    Color color =
-        (status == 'Accepted' || status == 'Confirmed' || status == 'Completed')
-            ? Colors.green
-            : (status == 'Rejected' ? Colors.red : Colors.orange);
+    Color c = (status == 'Accepted' || status == 'Completed')
+        ? Colors.green
+        : (status == 'Rejected'
+            ? Colors.red
+            : (status == 'Shipped' || status == 'In Transit'
+                ? Colors.blue
+                : Colors.orange));
     return Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
         decoration: BoxDecoration(
-            color: color.withOpacity(0.1),
-            borderRadius: BorderRadius.circular(6),
-            border: Border.all(color: color.withOpacity(0.2))),
+            color: c.withOpacity(0.1), borderRadius: BorderRadius.circular(20)),
         child: Text(status,
             style: GoogleFonts.poppins(
-                color: color, fontSize: 11, fontWeight: FontWeight.bold)));
+                color: c, fontSize: 12, fontWeight: FontWeight.bold)));
   }
 
-  Widget _buildCustomTimeline(String currentStatus) {
-    int currentStep = (currentStatus == 'Packed')
+  Widget _buildLiveBadge() => Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+          color: Colors.red, borderRadius: BorderRadius.circular(4)),
+      child: Text("LIVE",
+          style: GoogleFonts.poppins(
+              color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)));
+
+  Widget _buildCustomTimeline(String s) {
+    int step = (s == 'Packed')
         ? 1
-        : (['Shipped', 'In Transit'].contains(currentStatus)
+        : (['Shipped', 'In Transit'].contains(s)
             ? 2
-            : (['Delivered', 'Completed'].contains(currentStatus) ? 3 : 0));
+            : (['Delivered', 'Completed'].contains(s) ? 3 : 0));
     return Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-      _buildTimelineStep(_text('confirmed'), 0, currentStep), // ✅ "Confirmed"
-      _buildTimelineLine(0, currentStep),
-      _buildTimelineStep(_text('packed'), 1, currentStep), // ✅ "Packed"
-      _buildTimelineLine(1, currentStep),
-      _buildTimelineStep(_text('shipped'), 2, currentStep), // ✅ "Shipped"
-      _buildTimelineLine(2, currentStep),
-      _buildTimelineStep(_text('delivered'), 3, currentStep) // ✅ "Delivered"
+      _step("Confirmed", 0, step),
+      _line(0, step),
+      _step("Packed", 1, step),
+      _line(1, step),
+      _step("Shipped", 2, step),
+      _line(2, step),
+      _step("Delivered", 3, step)
     ]);
   }
 
-  Widget _buildTimelineStep(String label, int index, int currentStep) {
-    bool isCompleted = index <= currentStep;
-    return Column(children: [
-      Container(
-          height: 20,
-          width: 20,
-          decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: isCompleted ? Colors.green : Colors.white,
-              border: Border.all(
-                  color: isCompleted ? Colors.green : Colors.grey.shade300,
-                  width: 2)),
-          child: isCompleted
-              ? const Icon(Icons.check, size: 12, color: Colors.white)
-              : null),
-      const SizedBox(height: 4),
-      // ✅ Use SizedBox to control label width
-      SizedBox(
-          width: 50,
-          child: Text(label,
-              textAlign: TextAlign.center,
-              style: GoogleFonts.poppins(
-                  fontSize: 9,
-                  color: isCompleted ? Colors.black : Colors.grey))),
-    ]);
-  }
+  Widget _step(String l, int i, int c) => Column(children: [
+        Icon(Icons.check_circle,
+            color: i <= c ? Colors.green : Colors.grey.shade300, size: 24),
+        const SizedBox(height: 4),
+        Text(l,
+            style: GoogleFonts.poppins(
+                fontSize: 10, color: i <= c ? Colors.black : Colors.grey))
+      ]);
+  Widget _line(int i, int c) => Expanded(
+      child: Container(
+          height: 2,
+          color: i < c ? Colors.green : Colors.grey.shade300,
+          margin: const EdgeInsets.only(bottom: 20)));
 
-  Widget _buildTimelineLine(int index, int currentStep) {
-    return Expanded(
-        child: Container(
-            height: 2,
-            color: index < currentStep ? Colors.green : Colors.grey.shade300,
-            margin: const EdgeInsets.only(bottom: 14)));
+  Widget _buildAnimatedTruck(
+      double fLat, double fLng, double bLat, double bLng) {
+    double dist = Geolocator.distanceBetween(fLat, fLng, bLat, bLng);
+    double prog = (1.0 - (dist / 10000)).clamp(0.0, 1.0);
+    return AnimatedAlign(
+        duration: const Duration(seconds: 2),
+        alignment: Alignment(ui.lerpDouble(-0.8, 0.8, prog)!, 0),
+        child: const Icon(Icons.local_shipping,
+            color: Colors.blueAccent, size: 30));
   }
 }
 
@@ -721,39 +718,28 @@ class _MapMarker extends StatelessWidget {
   const _MapMarker(
       {required this.label, required this.icon, this.color = Colors.black});
   @override
-  Widget build(BuildContext context) {
-    return Column(children: [
-      Icon(icon, color: color, size: 24),
-      Container(
-          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-          decoration: BoxDecoration(
-              color: Colors.white, borderRadius: BorderRadius.circular(4)),
-          child: Text(label,
-              style: GoogleFonts.poppins(
-                  fontSize: 8, fontWeight: FontWeight.bold))),
-    ]);
-  }
+  Widget build(BuildContext context) => Column(children: [
+        Icon(icon, color: color, size: 24),
+        const SizedBox(height: 4),
+        Text(label,
+            style:
+                GoogleFonts.poppins(fontSize: 10, fontWeight: FontWeight.bold))
+      ]);
 }
 
-class _CurveRoutePainter extends CustomPainter {
+class _RoutePainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
       ..color = Colors.grey.shade400
-      ..strokeWidth = 2
+      ..strokeWidth = 3
       ..style = PaintingStyle.stroke
       ..strokeCap = StrokeCap.round;
-    final path = Path();
-    path.moveTo(35, size.height - 35);
-    path.quadraticBezierTo(
-        size.width * 0.5, size.height * 0.5, size.width - 35, 35);
-    final ui.PathMetrics metrics = path.computeMetrics();
-    for (ui.PathMetric metric in metrics) {
-      double distance = 0.0;
-      while (distance < metric.length) {
-        canvas.drawPath(metric.extractPath(distance, distance + 4), paint);
-        distance += 8;
-      }
+    double x = 40;
+    while (x < size.width - 45) {
+      canvas.drawLine(
+          Offset(x, size.height / 2), Offset(x + 5, size.height / 2), paint);
+      x += 12;
     }
   }
 

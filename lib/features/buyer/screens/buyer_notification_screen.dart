@@ -1,10 +1,14 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 
-// ✅ IMPORT BUYER ORDERS SCREEN
+// ✅ Internal Feature Imports
 import 'package:agriyukt_app/features/buyer/screens/buyer_orders_screen.dart';
+import 'package:agriyukt_app/features/buyer/screens/buyer_order_detail_screen.dart';
 
 class BuyerNotificationScreen extends StatefulWidget {
   const BuyerNotificationScreen({super.key});
@@ -14,82 +18,137 @@ class BuyerNotificationScreen extends StatefulWidget {
       _BuyerNotificationScreenState();
 }
 
-class _BuyerNotificationScreenState extends State<BuyerNotificationScreen> {
+class _BuyerNotificationScreenState extends State<BuyerNotificationScreen>
+    with WidgetsBindingObserver {
   final _supabase = Supabase.instance.client;
+  Timer? _staleDataTimer;
 
-  // ✅ Buyer Theme Color
-  final Color _themeColor = const Color(0xFF1565C0);
+  // ✅ ANTI-POP FIX: Cache the stream so it doesn't recreate during lifecycle changes
+  late final Stream<List<Map<String, dynamic>>> _notificationStream;
 
-  // --- 🕒 Helper: Format Time ---
-  String _formatTime(String? isoString) {
-    if (isoString == null) return "Just now";
-    try {
-      final date = DateTime.parse(isoString).toLocal();
-      final now = DateTime.now();
-      final diff = now.difference(date);
+  // Signature Buyer Theme Constants
+  static const Color _primaryBlue = Color(0xFF1565C0);
+  static const Color _surfaceBg = Color(0xFFF4F6F8);
 
-      if (diff.inMinutes < 1) return "Just now";
-      if (diff.inMinutes < 60) return "${diff.inMinutes}m ago";
-      if (diff.inHours < 24) return "${diff.inHours}h ago";
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
 
-      return DateFormat('dd MMM').format(date);
-    } catch (e) {
-      return "";
-    }
-  }
-
-  // --- 📩 Action: Mark Single as Read ---
-  Future<void> _markAsRead(String id) async {
-    await _supabase
-        .from('notifications')
-        .update({'is_read': true}).eq('id', id);
-  }
-
-  // --- 📨 Action: Mark All as Read ---
-  Future<void> _markAllAsRead() async {
+    // 1. Initialize Stream EXACTLY ONCE to prevent UI flickering
     final userId = _supabase.auth.currentUser?.id;
-    if (userId == null) return;
-
-    await _supabase
-        .from('notifications')
-        .update({'is_read': true})
-        .eq('user_id', userId)
-        .eq('is_read', false);
-  }
-
-  // --- 🗑️ Action: Delete Notification ---
-  Future<void> _deleteNotification(String id) async {
-    await _supabase.from('notifications').delete().eq('id', id);
-  }
-
-  // --- 🚀 SMART NAVIGATION LOGIC ---
-  void _handleTap(Map<String, dynamic> notif) {
-    final String id = notif['id'].toString();
-    final String type = notif['type'] ?? 'system';
-
-    // 1. Extract Data
-    final meta = notif['metadata'] ?? {};
-    final String? orderId = meta['order_id']?.toString(); // To scroll
-    final String rawStatus = meta['status']?.toString() ?? '';
-    final String status = rawStatus.toLowerCase(); // To choose tab
-
-    // 2. Mark as Read (Optimistic UI update)
-    if (notif['is_read'] == false) {
-      setState(() {
-        notif['is_read'] = true;
-      });
-      _markAsRead(id);
+    if (userId != null) {
+      _notificationStream = _supabase
+          .from('notifications')
+          .stream(primaryKey: ['id'])
+          .eq('user_id', userId)
+          .order('created_at', ascending: false)
+          .limit(150); // High limit prevents pagination traps
+    } else {
+      _notificationStream = const Stream.empty();
     }
 
-    // 3. Navigate based on Type & Status
-    if (type == 'order' || type == 'order_update') {
-      // Determine Tab Index for BuyerOrdersScreen (3 Tabs)
-      // 0 = Pending
-      // 1 = Active
-      // 2 = Completed
-      int targetTabIndex = 0; // Default Pending
+    // 2. Refresh headers every minute to keep "Today" / "Yesterday" mathematically accurate
+    _staleDataTimer = Timer.periodic(const Duration(minutes: 1), (_) {
+      if (mounted) setState(() {});
+    });
+  }
 
-      if ([
+  @override
+  void dispose() {
+    _staleDataTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && mounted) {
+      setState(() {});
+    }
+  }
+
+  // =======================================================================
+  // 🚀 120fps FLAT-LIST ENGINE: Flattens groups into a 1D array to prevent nested scrolling jank
+  // =======================================================================
+  List<dynamic> _flattenNotifications(List<Map<String, dynamic>> notifs) {
+    List<dynamic> flatList = [];
+    final now = DateTime.now();
+    String? currentGroup;
+
+    for (var notif in notifs) {
+      final dateStr = notif['created_at'];
+      if (dateStr == null) continue;
+      final date = DateTime.parse(dateStr).toLocal();
+
+      String groupKey;
+      if (date.year == now.year &&
+          date.month == now.month &&
+          date.day == now.day) {
+        groupKey = "Today";
+      } else if (date.year == now.year &&
+          date.month == now.month &&
+          date.day == now.day - 1) {
+        groupKey = "Yesterday";
+      } else {
+        groupKey = "Earlier";
+      }
+
+      // Inject header if the group changes
+      if (groupKey != currentGroup) {
+        flatList.add(groupKey);
+        currentGroup = groupKey;
+      }
+
+      flatList.add(notif);
+    }
+    return flatList;
+  }
+
+  // =======================================================================
+  // 🧭 INSTANT SNAP-ROUTING ENGINE (Zero Slide, Zero Fade)
+  // =======================================================================
+  void _handleTap(Map<String, dynamic> notif) async {
+    HapticFeedback.selectionClick();
+    final String id = notif['id'].toString();
+    final meta = notif['metadata'] ?? {};
+    final String? orderId = meta['order_id']?.toString();
+
+    // 1. Mark as read instantly in background
+    if (notif['is_read'] == false) {
+      setState(() => notif['is_read'] = true);
+      _supabase
+          .from('notifications')
+          .update({'is_read': true})
+          .eq('id', id)
+          .catchError((_) {});
+    }
+
+    if (!mounted || orderId == null) return;
+
+    try {
+      // 2. Fetch absolute latest status directly from DB to prevent routing errors
+      final orderData = await _supabase
+          .from('orders')
+          .select('status')
+          .eq('id', orderId)
+          .maybeSingle();
+      if (!mounted) return;
+
+      if (orderData == null) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text("Order details are no longer available.",
+              style: GoogleFonts.poppins()),
+          backgroundColor: Colors.red.shade800,
+          behavior: SnackBarBehavior.floating,
+        ));
+        return;
+      }
+
+      final status =
+          (orderData['status'] ?? '').toString().toLowerCase().trim();
+
+      final activeStates = [
         'accepted',
         'confirmed',
         'packed',
@@ -97,86 +156,120 @@ class _BuyerNotificationScreenState extends State<BuyerNotificationScreen> {
         'in transit',
         'out for delivery',
         'processing'
-      ].contains(status)) {
-        targetTabIndex = 1; // Active Tab
-      } else if (['delivered', 'completed', 'rejected', 'cancelled']
-          .contains(status)) {
-        targetTabIndex = 2; // Completed Tab
-      }
-      // 'pending' or 'ordered' stays at 0
+      ];
+      final historyStates = ['delivered', 'completed', 'rejected', 'cancelled'];
 
+      Widget targetScreen;
+
+      // 3. APPLY SPECIFIC ROUTING LOGIC
+      if (activeStates.contains(status)) {
+        // ✅ ACCEPTED/ACTIVE: Prepare to jump straight into the details
+        targetScreen = BuyerOrderDetailScreen(orderId: orderId);
+      } else {
+        // ✅ PENDING or REJECTED/COMPLETED: Prepare to jump to the Glowing Crop Card!
+        int targetTab = historyStates.contains(status) ? 2 : 0;
+        targetScreen = BuyerOrdersScreen(
+            initialIndex: targetTab, highlightOrderId: orderId);
+      }
+
+      // 4. ✅ INSTANT SNAP: TransitionDuration is zero! No sliding, no fading!
       Navigator.push(
         context,
-        MaterialPageRoute(
-          builder: (_) => BuyerOrdersScreen(
-            initialIndex: targetTabIndex, // ✅ Smart Tab Selection
-            highlightOrderId: orderId, // ✅ Triggers auto-scroll
-          ),
+        PageRouteBuilder(
+          pageBuilder: (_, __, ___) => targetScreen,
+          transitionDuration: Duration.zero,
+          reverseTransitionDuration: Duration.zero,
         ),
       );
+    } catch (e) {
+      debugPrint("Navigation Error: $e");
     }
+  }
+
+  Future<void> _markAllRead(String uid) async {
+    HapticFeedback.mediumImpact();
+    await _supabase
+        .from('notifications')
+        .update({'is_read': true})
+        .eq('user_id', uid)
+        .eq('is_read', false);
   }
 
   @override
   Widget build(BuildContext context) {
     final userId = _supabase.auth.currentUser?.id;
-    if (userId == null)
-      return const Scaffold(body: Center(child: Text("Please log in")));
+    if (userId == null) {
+      return const Scaffold(
+          body: Center(child: Text("Authentication Required")));
+    }
 
     return Scaffold(
-      backgroundColor: const Color(0xFFF5F7FA),
+      backgroundColor: _surfaceBg,
       appBar: AppBar(
         title: Text("Notifications",
             style: GoogleFonts.poppins(
-                color: Colors.white, fontWeight: FontWeight.bold)),
-        backgroundColor: _themeColor, // ✅ Buyer Blue
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+                fontSize: 20)),
+        backgroundColor: _primaryBlue,
         elevation: 0,
-        iconTheme: const IconThemeData(color: Colors.white),
         actions: [
-          TextButton(
-            onPressed: _markAllAsRead,
-            child: Text("Mark all read",
-                style: GoogleFonts.poppins(
-                    color: Colors.white, fontWeight: FontWeight.w600)),
+          IconButton(
+            icon: const Icon(Icons.done_all_rounded, color: Colors.white),
+            onPressed: () => _markAllRead(userId),
+            tooltip: "Mark all read",
           )
         ],
       ),
       body: StreamBuilder<List<Map<String, dynamic>>>(
-        stream: _supabase
-            .from('notifications')
-            .stream(primaryKey: ['id'])
-            .eq('user_id', userId)
-            .order('created_at', ascending: false)
-            .limit(50),
+        stream:
+            _notificationStream, // Uses cached stream to prevent rebuild pops
         builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return Center(child: CircularProgressIndicator(color: _themeColor));
+          if (snapshot.connectionState == ConnectionState.waiting &&
+              !snapshot.hasData) {
+            return _buildSkeletonLoader();
           }
 
-          if (!snapshot.hasData || snapshot.data!.isEmpty) {
-            return Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(Icons.notifications_off_outlined,
-                      size: 60, color: Colors.grey[400]),
-                  const SizedBox(height: 10),
-                  Text("No notifications yet",
-                      style: GoogleFonts.poppins(
-                          color: Colors.grey[600], fontSize: 16)),
-                ],
-              ),
-            );
-          }
-
-          final notifications = snapshot.data!;
+          final flatList = _flattenNotifications(snapshot.data ?? []);
+          if (flatList.isEmpty) return _buildEmptyState();
 
           return ListView.builder(
-            itemCount: notifications.length,
-            padding: const EdgeInsets.all(12),
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: EdgeInsets.fromLTRB(
+                16, 8, 16, MediaQuery.of(context).padding.bottom + 40),
+            itemCount: flatList.length,
             itemBuilder: (context, index) {
-              final notif = notifications[index];
-              return _buildNotificationCard(notif);
+              final item = flatList[index];
+
+              // Render Header
+              if (item is String) {
+                return Padding(
+                  padding: const EdgeInsets.only(left: 8, bottom: 12, top: 24),
+                  child: Text(item,
+                      style: GoogleFonts.poppins(
+                          fontWeight: FontWeight.bold,
+                          color: Colors.grey.shade500,
+                          fontSize: 13,
+                          letterSpacing: 0.5)),
+                );
+              }
+
+              // Render Notification Tile
+              final notif = item as Map<String, dynamic>;
+              return _NotificationTile(
+                key: ValueKey(notif['id']
+                    .toString()), // Strict key prevents list-swap jank
+                notif: notif,
+                onTap: () => _handleTap(notif),
+                onDelete: () {
+                  HapticFeedback.vibrate();
+                  _supabase
+                      .from('notifications')
+                      .delete()
+                      .eq('id', notif['id']);
+                },
+                primaryColor: _primaryBlue,
+              );
             },
           );
         },
@@ -184,96 +277,173 @@ class _BuyerNotificationScreenState extends State<BuyerNotificationScreen> {
     );
   }
 
-  Widget _buildNotificationCard(Map<String, dynamic> notif) {
-    final bool isRead = notif['is_read'] ?? false;
-    final String id = notif['id'].toString();
-    final String title = notif['title'] ?? 'Notification';
-    final String body = notif['body'] ?? '';
-
-    // ✅ EXTRACT METADATA (Image)
-    final Map<String, dynamic> meta = notif['metadata'] ?? {};
-    final String? imageUrl = meta['image'];
-
-    return Dismissible(
-      key: Key(id),
-      direction: DismissDirection.endToStart,
-      background: Container(
-        alignment: Alignment.centerRight,
-        padding: const EdgeInsets.only(right: 20),
+  Widget _buildSkeletonLoader() {
+    return ListView.builder(
+      padding: const EdgeInsets.all(16),
+      itemCount: 8,
+      itemBuilder: (_, __) => Container(
+        height: 88,
+        margin: const EdgeInsets.only(bottom: 12),
         decoration: BoxDecoration(
-          color: Colors.red.shade400,
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: const Icon(Icons.delete, color: Colors.white),
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: Colors.grey.shade200)),
       ),
-      onDismissed: (_) => _deleteNotification(id),
-      child: Card(
-        elevation: 0,
-        margin: const EdgeInsets.only(bottom: 10),
-        color: isRead ? Colors.white : Colors.blue.shade50,
-        shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
-            side: BorderSide(
-                color: isRead ? Colors.grey.shade200 : Colors.blue.shade100)),
-        child: InkWell(
-          onTap: () => _handleTap(notif), // ✅ Use New Smart Handler
-          borderRadius: BorderRadius.circular(12),
-          child: Padding(
-            padding: const EdgeInsets.all(12),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // ✅ LEADING IMAGE (Crop) OR ICON
-                _buildLeadingImage(imageUrl, isRead),
+    );
+  }
 
-                const SizedBox(width: 12),
+  Widget _buildEmptyState() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+                color: Colors.white,
+                shape: BoxShape.circle,
+                boxShadow: [
+                  BoxShadow(
+                      color: Colors.black.withOpacity(0.04), blurRadius: 16)
+                ]),
+            child: Icon(Icons.notifications_off_outlined,
+                size: 50, color: _primaryBlue.withOpacity(0.5)),
+          ),
+          const SizedBox(height: 20),
+          Text("No notifications yet",
+              style: GoogleFonts.poppins(
+                  color: Colors.black87,
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          Text("We'll notify you when your orders update.",
+              textAlign: TextAlign.center,
+              style: GoogleFonts.poppins(
+                  color: Colors.grey.shade500, fontSize: 13)),
+        ],
+      ),
+    );
+  }
+}
 
-                // ✅ CONTENT
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+// ============================================================================
+// ✅ ISOLATED & BOUNDED TILE: Uses RepaintBoundary for silky 120fps scrolling
+// ============================================================================
+class _NotificationTile extends StatelessWidget {
+  final Map<String, dynamic> notif;
+  final VoidCallback onTap;
+  final VoidCallback onDelete;
+  final Color primaryColor;
+
+  const _NotificationTile({
+    super.key,
+    required this.notif,
+    required this.onTap,
+    required this.onDelete,
+    required this.primaryColor,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final bool isRead = notif['is_read'] ?? false;
+    final meta = notif['metadata'] ?? {};
+    final String? imageUrl = meta['image'];
+    final DateTime createdAt = DateTime.parse(notif['created_at']).toLocal();
+
+    return RepaintBoundary(
+      child: Dismissible(
+        key: Key("dismiss_${notif['id']}"),
+        direction: DismissDirection.endToStart,
+        onDismissed: (_) => onDelete(),
+        background: Container(
+          margin: const EdgeInsets.only(bottom: 12),
+          decoration: BoxDecoration(
+              color: Colors.red.shade500,
+              borderRadius: BorderRadius.circular(20)),
+          alignment: Alignment.centerRight,
+          padding: const EdgeInsets.only(right: 25),
+          child: const Icon(Icons.delete_sweep_rounded,
+              color: Colors.white, size: 28),
+        ),
+        child: Container(
+          margin: const EdgeInsets.only(bottom: 12),
+          decoration: BoxDecoration(
+            color: isRead ? Colors.white : const Color(0xFFF0F7FF),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(
+                color: isRead
+                    ? Colors.grey.shade200
+                    : primaryColor.withOpacity(0.3),
+                width: 1),
+            boxShadow: [
+              BoxShadow(
+                  color: Colors.black.withOpacity(0.02),
+                  blurRadius: 15,
+                  offset: const Offset(0, 5))
+            ],
+          ),
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: onTap,
+              borderRadius: BorderRadius.circular(20),
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _buildStrictImage(imageUrl, isRead),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Expanded(
-                            child: Text(title,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: GoogleFonts.poppins(
-                                    fontWeight: isRead
-                                        ? FontWeight.w500
-                                        : FontWeight.bold,
-                                    fontSize: 15,
-                                    color: Colors.black87)),
-                          ),
-                          Text(_formatTime(notif['created_at']),
+                          RichText(
+                            maxLines: 3,
+                            overflow: TextOverflow.ellipsis,
+                            text: TextSpan(
                               style: GoogleFonts.poppins(
-                                  color: Colors.grey, fontSize: 11)),
+                                  fontSize: 14,
+                                  color: Colors.black87,
+                                  height: 1.4),
+                              children: [
+                                TextSpan(
+                                    text: "${notif['title']}  ",
+                                    style: TextStyle(
+                                        fontWeight: isRead
+                                            ? FontWeight.w600
+                                            : FontWeight.bold)),
+                                TextSpan(
+                                    text: notif['body'] ?? '',
+                                    style:
+                                        TextStyle(color: Colors.grey.shade700)),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text(DateFormat('hh:mm a').format(createdAt),
+                                  style: GoogleFonts.jetBrainsMono(
+                                      fontSize: 11,
+                                      color: Colors.grey.shade500,
+                                      fontWeight: FontWeight.w500)),
+                              if (!isRead)
+                                Container(
+                                    width: 8,
+                                    height: 8,
+                                    decoration: BoxDecoration(
+                                        color: primaryColor,
+                                        shape: BoxShape.circle)),
+                            ],
+                          ),
                         ],
                       ),
-                      const SizedBox(height: 4),
-                      Text(body,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: GoogleFonts.poppins(
-                              color: Colors.black54,
-                              fontSize: 13,
-                              height: 1.3)),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
-
-                // Unread Dot
-                if (!isRead)
-                  Container(
-                    margin: const EdgeInsets.only(left: 8, top: 5),
-                    width: 8,
-                    height: 8,
-                    decoration: const BoxDecoration(
-                        color: Colors.blue, shape: BoxShape.circle),
-                  )
-              ],
+              ),
             ),
           ),
         ),
@@ -281,50 +451,39 @@ class _BuyerNotificationScreenState extends State<BuyerNotificationScreen> {
     );
   }
 
-  // ✅ FIXED: Helper to show Image (Full URL) or Fallback Icon
-  Widget _buildLeadingImage(String? imageUrl, bool isRead) {
-    if (imageUrl != null && imageUrl.isNotEmpty) {
-      String fullUrl = imageUrl;
-
-      // If it is NOT a full link (starts with http), assume it's a storage path
-      if (!imageUrl.startsWith('http')) {
-        try {
-          // Generate the public URL from Supabase Storage
-          fullUrl = _supabase.storage
-              .from('crop_images') // Ensure this matches your bucket name
-              .getPublicUrl(imageUrl);
-        } catch (_) {
-          // Keep original if generation fails
-        }
-      }
-
-      return Container(
-        height: 50,
-        width: 50,
+  // ✅ STRICT IMAGE GEOMETRY: Ensures layout never collapses during image decodes
+  Widget _buildStrictImage(String? url, bool isRead) {
+    return SizedBox(
+      height: 56,
+      width: 56,
+      child: Container(
         decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(10),
-          color: Colors.grey.shade200,
-          image: DecorationImage(
-            image: NetworkImage(fullUrl),
-            fit: BoxFit.cover,
-            onError: (e, s) {}, // Handle errors silently
-          ),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: Colors.grey.shade200),
+          color: isRead ? Colors.grey.shade50 : primaryColor.withOpacity(0.05),
         ),
-      );
-    }
-
-    // Fallback Icon
-    return Container(
-      height: 50,
-      width: 50,
-      decoration: BoxDecoration(
-        color: isRead ? Colors.grey[100] : Colors.blue[100],
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: Icon(
-        Icons.shopping_bag_outlined,
-        color: isRead ? Colors.grey : _themeColor,
-        size: 24,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(15),
+          child: (url != null && url.isNotEmpty)
+              ? CachedNetworkImage(
+                  imageUrl: url.startsWith('http')
+                      ? url
+                      : Supabase.instance.client.storage
+                          .from('crop_images')
+                          .getPublicUrl(url),
+                  fit: BoxFit.cover,
+                  memCacheWidth:
+                      150, // Micro-pop fix: Decodes image small in background
+                  fadeInDuration: const Duration(milliseconds: 150),
+                  placeholder: (context, url) =>
+                      Container(color: Colors.transparent),
+                  errorWidget: (context, url, error) => Icon(
+                      Icons.notifications_active_outlined,
+                      color: isRead ? Colors.grey.shade400 : primaryColor),
+                )
+              : Icon(Icons.notifications_active_outlined,
+                  color: isRead ? Colors.grey.shade400 : primaryColor),
+        ),
       ),
     );
   }

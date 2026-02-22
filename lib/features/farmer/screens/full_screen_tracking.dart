@@ -1,13 +1,11 @@
 import 'dart:async';
 import 'dart:ui' as ui;
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:flutter_polyline_points/flutter_polyline_points.dart';
-import 'package:google_fonts/google_fonts.dart'; // ✅ Added typography
+import 'package:google_fonts/google_fonts.dart';
 import 'dart:math' as math;
-import '../../common/screens/chat_screen.dart';
 
 class FullScreenTracking extends StatefulWidget {
   final String orderId;
@@ -25,153 +23,100 @@ class _FullScreenTrackingState extends State<FullScreenTracking> {
   final _supabase = Supabase.instance.client;
   final Completer<GoogleMapController> _mapController = Completer();
 
-  // 🔑 API KEY
+  // 🔑 IMPORTANT: Ensure your Google Maps Billing is active for Routing API
   final String googleApiKey = "AIzaSyD1ioETNK6cCxUud9k98JuTH3SzoyN2Fjc";
 
-  // State
   LatLng? _farmLocation;
   Set<Polyline> _polylines = {};
-  List<LatLng> _routeCoords = [];
-
-  // Custom Icons
   BitmapDescriptor? _truckIcon;
   BitmapDescriptor? _farmerIcon;
 
-  // Rotation Tracking
   LatLng? _lastPos;
   double _lastRotation = 0.0;
-
-  // Theme Color
   final Color _primaryGreen = const Color(0xFF1B5E20);
 
   @override
   void initState() {
     super.initState();
     _loadCustomIcons();
-    _loadInitialData();
+    _fetchFarmLocation(); // ✅ Now correctly fetches the Farm's location, not the current user's.
   }
 
-  // 🎨 CREATE CUSTOM ICONS
   Future<void> _loadCustomIcons() async {
-    final truck = await _bitmapDescriptorFromIconData(
+    _truckIcon = await _bitmapDescriptorFromIconData(
         Icons.local_shipping, Colors.blueAccent, 100);
-    final farmer = await _bitmapDescriptorFromIconData(
-        Icons.person_pin_circle, Colors.green, 100);
-    setState(() {
-      _truckIcon = truck;
-      _farmerIcon = farmer;
-    });
+    _farmerIcon = await _bitmapDescriptorFromIconData(
+        Icons.store, Colors.brown, 100); // Changed to store icon for Farm
+    if (mounted) setState(() {});
   }
 
-  Future<BitmapDescriptor> _bitmapDescriptorFromIconData(
-      IconData iconData, Color color, double size) async {
-    final ui.PictureRecorder pictureRecorder = ui.PictureRecorder();
-    final Canvas canvas = Canvas(pictureRecorder);
-    final Paint paint = Paint()..color = color;
-    final TextPainter textPainter =
-        TextPainter(textDirection: TextDirection.ltr);
-    final double radius = size / 2;
-    canvas.drawCircle(Offset(radius, radius), radius, paint);
-    textPainter.text = TextSpan(
-        text: String.fromCharCode(iconData.codePoint),
-        style: TextStyle(
-            fontSize: size * 0.6,
-            fontFamily: iconData.fontFamily,
-            color: Colors.white));
-    textPainter.layout();
-    textPainter.paint(
-        canvas,
-        Offset(
-            radius - textPainter.width / 2, radius - textPainter.height / 2));
-    final ui.Image image = await pictureRecorder
-        .endRecording()
-        .toImage(size.toInt(), size.toInt());
-    final ByteData? byteData =
-        await image.toByteData(format: ui.ImageByteFormat.png);
-    return BitmapDescriptor.fromBytes(byteData!.buffer.asUint8List());
-  }
-
-  // 1. Load Initial Data
-  Future<void> _loadInitialData() async {
+  // ✅ LOGISTICS FIX: Destination is ALWAYS the Farmer's location from the Order
+  Future<void> _fetchFarmLocation() async {
     try {
-      final user = _supabase.auth.currentUser;
-      if (user == null) return;
+      final orderData = await _supabase.from('orders').select('''
+          destination_lat, destination_lng,
+          farmer:profiles!orders_farmer_id_fkey(latitude, longitude)
+      ''').eq('id', widget.orderId).single();
 
-      final profile = await _supabase
-          .from('profiles')
-          .select('latitude, longitude')
-          .eq('id', user.id)
-          .single();
-      final order = await _supabase
-          .from('orders')
-          .select('buyer_lat, buyer_lng')
-          .eq('id', widget.orderId)
-          .single();
+      final rawFarmer = orderData['farmer'];
+      final farmer = rawFarmer is Map
+          ? rawFarmer
+          : (rawFarmer is List && rawFarmer.isNotEmpty ? rawFarmer[0] : {});
 
-      if (mounted) {
+      // Fallbacks to ensure we always have a destination
+      double? fLat = (orderData['destination_lat'] as num?)?.toDouble() ??
+          (farmer['latitude'] as num?)?.toDouble();
+      double? fLng = (orderData['destination_lng'] as num?)?.toDouble() ??
+          (farmer['longitude'] as num?)?.toDouble();
+
+      if (fLat != null && fLng != null && mounted) {
         setState(() {
-          double? fLat = (profile['latitude'] as num?)?.toDouble();
-          double? fLng = (profile['longitude'] as num?)?.toDouble();
-          if (fLat != null && fLng != null) {
-            _farmLocation = LatLng(fLat, fLng);
-          }
-
-          double? bLat = (order['buyer_lat'] as num?)?.toDouble();
-          double? bLng = (order['buyer_lng'] as num?)?.toDouble();
-          if (bLat != null && bLng != null && _farmLocation != null) {
-            _getRoutePolyline(LatLng(bLat, bLng), _farmLocation!);
-          }
+          _farmLocation = LatLng(fLat, fLng);
         });
       }
     } catch (e) {
-      debugPrint("Init Error: $e");
+      debugPrint("Farm Location Fetch Error: $e");
     }
   }
 
-  // 2. Fetch Route
-  Future<void> _getRoutePolyline(LatLng start, LatLng dest) async {
+  // ✅ REDRAWS ROUTE LIVE: This creates the "Simulation" effect
+  Future<void> _updateLiveRoute(LatLng currentPos) async {
+    if (_farmLocation == null) return;
+
     PolylinePoints polylinePoints = PolylinePoints(apiKey: googleApiKey);
-    try {
-      PolylineResult result = await polylinePoints.getRouteBetweenCoordinates(
-        request: PolylineRequest(
-          origin: PointLatLng(start.latitude, start.longitude),
-          destination: PointLatLng(dest.latitude, dest.longitude),
-          mode: TravelMode.driving,
-        ),
-      );
+    PolylineResult result = await polylinePoints.getRouteBetweenCoordinates(
+      request: PolylineRequest(
+        origin: PointLatLng(currentPos.latitude, currentPos.longitude),
+        destination:
+            PointLatLng(_farmLocation!.latitude, _farmLocation!.longitude),
+        mode: TravelMode.driving,
+      ),
+    );
 
-      if (result.points.isNotEmpty) {
-        List<LatLng> polylineCoordinates =
-            result.points.map((p) => LatLng(p.latitude, p.longitude)).toList();
-        if (mounted) {
-          setState(() {
-            _routeCoords = polylineCoordinates;
-            _polylines = {
-              Polyline(
-                polylineId: const PolylineId('real_route'),
-                color: Colors.blueAccent,
-                points: polylineCoordinates,
-                width: 6,
-                jointType: JointType.round,
-              ),
-            };
-          });
-        }
-      }
-    } catch (e) {
-      debugPrint("Route Error: $e");
+    if (result.points.isNotEmpty && mounted) {
+      setState(() {
+        _polylines = {
+          Polyline(
+            polylineId: const PolylineId('live_route'),
+            color: Colors.blueAccent,
+            points: result.points
+                .map((p) => LatLng(p.latitude, p.longitude))
+                .toList(),
+            width: 6,
+            jointType: JointType.round,
+          ),
+        };
+      });
     }
   }
 
-  // 3. Camera Animation
   void _animateCamera(LatLng pos, double rotation) async {
-    final GoogleMapController controller = await _mapController.future;
+    final controller = await _mapController.future;
     controller.animateCamera(CameraUpdate.newCameraPosition(
-      CameraPosition(target: pos, zoom: 18, bearing: rotation, tilt: 60),
+      CameraPosition(target: pos, zoom: 17, bearing: rotation, tilt: 45),
     ));
   }
 
-  // Math Helper
   double _calculateBearing(LatLng start, LatLng end) {
     double lat1 = start.latitude * (math.pi / 180.0);
     double lon1 = start.longitude * (math.pi / 180.0);
@@ -188,174 +133,162 @@ class _FullScreenTrackingState extends State<FullScreenTracking> {
   Widget build(BuildContext context) {
     return Scaffold(
       body: StreamBuilder<List<Map<String, dynamic>>>(
-        // ⚡ PURE REAL-TIME LISTENER
         stream: _supabase
             .from('orders')
             .stream(primaryKey: ['id']).eq('id', widget.orderId),
         builder: (context, snapshot) {
-          LatLng currentPos = const LatLng(0, 0);
-          bool hasData = false;
-          String buyerName = "Logistics Partner";
-          String status = "In Transit";
-          String buyerId = "";
-
-          if (snapshot.hasData && snapshot.data!.isNotEmpty) {
-            final data = snapshot.data!.first;
-            double? lat = (data['buyer_lat'] as num?)?.toDouble();
-            double? lng = (data['buyer_lng'] as num?)?.toDouble();
-            buyerName = data['buyer_name'] ?? "Logistics Partner";
-            status = data['tracking_status'] ?? "In Transit";
-            buyerId = data['buyer_id'] ?? "";
-
-            if (lat != null && lng != null) {
-              currentPos = LatLng(lat, lng);
-              hasData = true;
-            }
+          if (!snapshot.hasData || snapshot.data!.isEmpty) {
+            return const Center(child: CircularProgressIndicator());
           }
 
-          if (!hasData) return const Center(child: CircularProgressIndicator());
+          final data = snapshot.data!.first;
 
-          // ⚡ ROTATION & ANIMATION LOGIC
-          double rotation = _lastRotation;
-          if (_lastPos != null &&
-              (currentPos.latitude != _lastPos!.latitude ||
-                  currentPos.longitude != _lastPos!.longitude)) {
-            // Position Changed! Calculate new angle
-            rotation = _calculateBearing(_lastPos!, currentPos);
-            _lastRotation = rotation;
+          // ✅ LOGISTICS FIX: The Buyer is driving, so the moving truck is always buyer_lat/lng
+          double? lat = (data['buyer_lat'] as num?)?.toDouble() ??
+              (data['transport_lat'] as num?)?.toDouble();
+          double? lng = (data['buyer_lng'] as num?)?.toDouble() ??
+              (data['transport_lng'] as num?)?.toDouble();
+          String status =
+              data['tracking_status'] ?? data['status'] ?? "In Transit";
 
-            // 🎥 FORCE CAMERA MOVE
-            Future.delayed(
-                Duration.zero, () => _animateCamera(currentPos, rotation));
-          }
-          _lastPos = currentPos;
-
-          // ⚡ BUILD MARKERS
-          Set<Marker> markers = {};
-          if (_farmLocation != null) {
-            markers.add(Marker(
-              markerId: const MarkerId('farm'),
-              position: _farmLocation!,
-              icon: _farmerIcon ??
-                  BitmapDescriptor.defaultMarkerWithHue(
-                      BitmapDescriptor.hueGreen),
-              infoWindow: const InfoWindow(title: "Farm Location"),
+          if (lat == null || lng == null || lat == 0.0 || lng == 0.0) {
+            return Center(
+                child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(Icons.satellite_alt_rounded,
+                    size: 50, color: Colors.grey),
+                const SizedBox(height: 16),
+                Text("Waiting for Buyer's GPS signal...",
+                    style: GoogleFonts.poppins(
+                        color: Colors.grey.shade700,
+                        fontWeight: FontWeight.w600)),
+              ],
             ));
           }
-          markers.add(Marker(
-            markerId: const MarkerId('buyer'),
-            position: currentPos,
-            icon: _truckIcon ??
-                BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue),
-            rotation: rotation,
-            anchor: const Offset(0.5, 0.5),
-            flat: true,
-            infoWindow: InfoWindow(title: buyerName),
-          ));
+
+          LatLng currentPos = LatLng(lat, lng);
+
+          // Trigger map and polyline logic only when position significantly changes
+          if (_lastPos == null || _lastPos != currentPos) {
+            double rotation = _lastPos != null
+                ? _calculateBearing(_lastPos!, currentPos)
+                : _lastRotation;
+            _lastRotation = rotation;
+            _lastPos = currentPos;
+
+            // Updates polyline and camera safely after the build phase
+            Future.microtask(() {
+              _updateLiveRoute(currentPos);
+              _animateCamera(currentPos, rotation);
+            });
+          }
 
           return Stack(
             children: [
               GoogleMap(
-                mapType: MapType.normal,
                 initialCameraPosition:
                     CameraPosition(target: currentPos, zoom: 15),
-                markers: markers,
+                markers: {
+                  if (_farmLocation != null)
+                    Marker(
+                        markerId: const MarkerId('farm'),
+                        position: _farmLocation!,
+                        icon: _farmerIcon ?? BitmapDescriptor.defaultMarker),
+                  Marker(
+                    markerId: const MarkerId('truck'),
+                    position: currentPos,
+                    icon: _truckIcon ?? BitmapDescriptor.defaultMarker,
+                    rotation: _lastRotation,
+                    anchor: const Offset(0.5, 0.5),
+                    flat: true,
+                  ),
+                },
                 polylines: _polylines,
-                buildingsEnabled: true,
+                onMapCreated: (c) => _mapController.complete(c),
                 myLocationButtonEnabled: false,
                 zoomControlsEnabled: false,
-                compassEnabled: false,
-                onMapCreated: (c) => _mapController.complete(c),
+                mapToolbarEnabled: false,
               ),
+
+              // UI Overlay (Back Button)
               Positioned(
                 top: 50,
                 left: 20,
                 child: CircleAvatar(
                   backgroundColor: Colors.white,
                   child: IconButton(
-                      icon: const Icon(Icons.arrow_back, color: Colors.black),
+                      icon: const Icon(Icons.close, color: Colors.black),
                       onPressed: () => Navigator.pop(context)),
                 ),
               ),
+
+              // UI Overlay (Status Panel)
               Positioned(
-                bottom: 0,
-                left: 0,
-                right: 0,
+                bottom: 20,
+                left: 20,
+                right: 20,
                 child: Container(
                   padding: const EdgeInsets.all(20),
-                  decoration: const BoxDecoration(
-                    color: Colors.white,
-                    borderRadius:
-                        BorderRadius.vertical(top: Radius.circular(25)),
-                    boxShadow: [
-                      BoxShadow(color: Colors.black12, blurRadius: 15)
-                    ],
-                  ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
+                  decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(20),
+                      boxShadow: const [
+                        BoxShadow(color: Colors.black26, blurRadius: 10)
+                      ]),
+                  child: Row(
                     children: [
-                      Row(
-                        children: [
-                          const Icon(Icons.local_shipping,
-                              color: Colors.blue, size: 28),
-                          const SizedBox(width: 15),
-                          Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(buyerName,
-                                  style: GoogleFonts.poppins(
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 18)),
-                              Text("Logistics Partner",
-                                  style: GoogleFonts.poppins(
-                                      color: Colors.grey, fontSize: 12)),
-                            ],
-                          ),
-                          const Spacer(),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 12, vertical: 6),
-                            decoration: BoxDecoration(
-                                color: Colors.green.shade50,
-                                borderRadius: BorderRadius.circular(20)),
-                            child: Text(status,
-                                style: GoogleFonts.poppins(
-                                    color: Colors.green,
-                                    fontWeight: FontWeight.bold)),
-                          )
-                        ],
-                      ),
-                      const SizedBox(height: 20),
-                      ElevatedButton(
-                        onPressed: () => Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                                builder: (_) => ChatScreen(
-                                    targetUserId: buyerId,
-                                    targetName: buyerName,
-                                    orderId: widget.orderId,
-                                    cropName: "Logistics",
-                                    orderStatus: status))),
-                        style: ElevatedButton.styleFrom(
-                            backgroundColor: _primaryGreen,
-                            minimumSize: const Size(double.infinity, 50),
-                            shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(12))),
-                        child: Text("Message Buyer",
-                            style: GoogleFonts.poppins(
+                      const Icon(Icons.sensors, color: Colors.redAccent),
+                      const SizedBox(width: 15),
+                      Text("Live Delivery Status",
+                          style: GoogleFonts.poppins(
+                              fontWeight: FontWeight.bold, fontSize: 16)),
+                      const Spacer(),
+                      Chip(
+                        label: Text(status.toUpperCase(),
+                            style: const TextStyle(
                                 color: Colors.white,
-                                fontSize: 16,
+                                fontSize: 10,
                                 fontWeight: FontWeight.bold)),
-                      ),
-                      const SizedBox(height: 10),
+                        backgroundColor: _primaryGreen,
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 4, vertical: 0),
+                      )
                     ],
                   ),
                 ),
-              ),
+              )
             ],
           );
         },
       ),
     );
+  }
+
+  // Icon Generation Helper
+  Future<BitmapDescriptor> _bitmapDescriptorFromIconData(
+      IconData iconData, Color color, double size) async {
+    final ui.PictureRecorder pictureRecorder = ui.PictureRecorder();
+    final Canvas canvas = Canvas(pictureRecorder);
+    final Paint paint = Paint()..color = color;
+    final double radius = size / 2;
+    canvas.drawCircle(Offset(radius, radius), radius, paint);
+    TextPainter textPainter = TextPainter(textDirection: TextDirection.ltr);
+    textPainter.text = TextSpan(
+        text: String.fromCharCode(iconData.codePoint),
+        style: TextStyle(
+            fontSize: size * 0.6,
+            fontFamily: iconData.fontFamily,
+            color: Colors.white));
+    textPainter.layout();
+    textPainter.paint(
+        canvas,
+        Offset(
+            radius - textPainter.width / 2, radius - textPainter.height / 2));
+    final image = await pictureRecorder
+        .endRecording()
+        .toImage(size.toInt(), size.toInt());
+    final data = await image.toByteData(format: ui.ImageByteFormat.png);
+    return BitmapDescriptor.fromBytes(data!.buffer.asUint8List());
   }
 }

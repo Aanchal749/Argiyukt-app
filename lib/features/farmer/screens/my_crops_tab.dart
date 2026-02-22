@@ -1,11 +1,17 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:provider/provider.dart';
+import 'package:cached_network_image/cached_network_image.dart';
+import 'package:intl/intl.dart';
+
+// ✅ CORE & FEATURE IMPORTS
 import 'package:agriyukt_app/core/providers/language_provider.dart';
 import 'package:agriyukt_app/features/farmer/farmer_translations.dart';
 import 'package:agriyukt_app/core/services/translation_service.dart';
 import 'package:agriyukt_app/features/farmer/screens/add_crop_screen.dart';
+import 'package:agriyukt_app/features/farmer/screens/edit_crop_screen.dart';
 import 'package:agriyukt_app/features/farmer/screens/view_crop_screen.dart';
 
 class MyCropsTab extends StatefulWidget {
@@ -17,15 +23,37 @@ class MyCropsTab extends StatefulWidget {
 
 class _MyCropsTabState extends State<MyCropsTab> {
   final _client = Supabase.instance.client;
+
   bool _showActive = true;
   String _searchQuery = "";
   final _searchCtrl = TextEditingController();
+
+  // 🛡️ CRITICAL FIX: Forces the stream to drop cache and re-query DB
   int _refreshTrigger = 0;
 
   final Color _primaryGreen = const Color(0xFF1B5E20);
+
+  // Translation Helper
   String _text(String key) => FarmerText.get(context, key);
 
-  // --- DELETE LOGIC ---
+  @override
+  void dispose() {
+    _searchCtrl.dispose();
+    super.dispose();
+  }
+
+  // ---------------------------------------------------------------------------
+  // 🔄 MANUAL REFRESH LOGIC
+  // ---------------------------------------------------------------------------
+  Future<void> _refreshList() async {
+    setState(() => _refreshTrigger++);
+    // Slight delay to allow the pull-to-refresh animation to look smooth
+    await Future.delayed(const Duration(milliseconds: 400));
+  }
+
+  // ---------------------------------------------------------------------------
+  // 🗑️ DELETE LOGIC
+  // ---------------------------------------------------------------------------
   Future<void> _deleteCrop(String id) async {
     final confirm = await showDialog<bool>(
       context: context,
@@ -37,7 +65,7 @@ class _MyCropsTabState extends State<MyCropsTab> {
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(ctx, false),
-              child: Text(_text('cancel'))),
+              child: Text(_text('cancel'), style: GoogleFonts.poppins())),
           TextButton(
               onPressed: () => Navigator.pop(ctx, true),
               child: Text(_text('delete'),
@@ -48,28 +76,46 @@ class _MyCropsTabState extends State<MyCropsTab> {
     );
 
     if (confirm == true) {
-      await _client.from('crops').delete().eq('id', id);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text(_text('crop_deleted')), backgroundColor: Colors.red));
-        _refreshList();
+      try {
+        await _client.from('crops').delete().eq('id', id);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content:
+                  Text(_text('crop_deleted'), style: GoogleFonts.poppins()),
+              backgroundColor: Colors.red));
+          _refreshList(); // 🔄 Force UI to update immediately
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: Text("Error deleting: $e", style: GoogleFonts.poppins()),
+              backgroundColor: Colors.red));
+        }
       }
     }
   }
 
-  // ✅ Force Refresh
-  Future<void> _refreshList() async {
-    setState(() => _refreshTrigger++);
-    await Future.delayed(const Duration(milliseconds: 500));
+  // ---------------------------------------------------------------------------
+  // 🛡️ DATA SAFETY HELPERS
+  // ---------------------------------------------------------------------------
+  String _safeStr(dynamic val, [String fallback = '']) {
+    if (val == null) return fallback;
+    return val.toString().trim();
   }
 
+  // ---------------------------------------------------------------------------
+  // 🖥️ UI BUILD
+  // ---------------------------------------------------------------------------
   @override
   Widget build(BuildContext context) {
     final user = _client.auth.currentUser;
     final langCode =
         Provider.of<LanguageProvider>(context).appLocale.languageCode;
 
-    if (user == null) return Center(child: Text(_text('login_required')));
+    if (user == null) {
+      return Center(
+          child: Text(_text('login_required'), style: GoogleFonts.poppins()));
+    }
 
     return Scaffold(
       backgroundColor: const Color(0xFFF4F6F8),
@@ -77,7 +123,8 @@ class _MyCropsTabState extends State<MyCropsTab> {
         onPressed: () async {
           await Navigator.push(context,
               MaterialPageRoute(builder: (_) => const AddCropScreen()));
-          _refreshList();
+          if (!mounted) return;
+          _refreshList(); // 🔄 Force fetch new crop from DB
         },
         label: Text(_text('add_crop'),
             style: GoogleFonts.poppins(fontWeight: FontWeight.bold)),
@@ -87,96 +134,170 @@ class _MyCropsTabState extends State<MyCropsTab> {
       ),
       body: Column(
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 20, 16, 10),
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: Text(_text('my_crops_inventory'),
-                  style: GoogleFonts.poppins(
-                      fontSize: 22,
-                      fontWeight: FontWeight.bold,
-                      color: _primaryGreen)),
+          // 🎨 CUSTOM GREEN HEADER (Search + Tabs only)
+          Container(
+            padding: EdgeInsets.only(
+              // 🔥 EXTREME UPLIFT: Removed the +8 entirely. It now sits flush with the status bar.
+              top: MediaQuery.of(context).padding.top,
+              // 🔥 EXTREME UPLIFT: Tighter bottom padding.
+              bottom: 8,
             ),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: TextField(
-              controller: _searchCtrl,
-              onChanged: (v) => setState(() => _searchQuery = v.toLowerCase()),
-              style: GoogleFonts.poppins(),
-              decoration: InputDecoration(
-                hintText: _text('search_crops_hint'),
-                hintStyle: GoogleFonts.poppins(color: Colors.grey[400]),
-                prefixIcon: Icon(Icons.search, color: _primaryGreen),
-                suffixIcon: _searchQuery.isNotEmpty
-                    ? IconButton(
-                        icon: const Icon(Icons.clear, color: Colors.grey),
-                        onPressed: () {
-                          _searchCtrl.clear();
-                          setState(() => _searchQuery = "");
-                        })
-                    : null,
-                filled: true,
-                fillColor: Colors.white,
-                contentPadding:
-                    const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
-                enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide(color: Colors.grey.shade200)),
-                focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide(color: _primaryGreen)),
-              ),
+            decoration: BoxDecoration(
+              color: _primaryGreen,
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.1),
+                  blurRadius: 8,
+                  offset: const Offset(0, 4),
+                )
+              ],
             ),
-          ),
-          Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: Row(
+            child: Column(
               children: [
-                Expanded(child: _tabBtn(_text('active_crops_tab'), true)),
-                const SizedBox(width: 10),
-                Expanded(child: _tabBtn(_text('inactive_sold_tab'), false)),
+                // --- SEARCH BAR ---
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: TextField(
+                    controller: _searchCtrl,
+                    onChanged: (v) =>
+                        setState(() => _searchQuery = v.toLowerCase().trim()),
+                    style: GoogleFonts.poppins(),
+                    decoration: InputDecoration(
+                      hintText: _text('search_crops_hint'),
+                      hintStyle: GoogleFonts.poppins(color: Colors.grey[500]),
+                      prefixIcon: Icon(Icons.search, color: _primaryGreen),
+                      suffixIcon: _searchQuery.isNotEmpty
+                          ? IconButton(
+                              icon: const Icon(Icons.clear, color: Colors.grey),
+                              onPressed: () {
+                                _searchCtrl.clear();
+                                setState(() => _searchQuery = "");
+                              })
+                          : null,
+                      filled: true,
+                      fillColor: Colors.white,
+                      // 🔥 EXTREME UPLIFT: Slimmer Search Bar height.
+                      contentPadding: const EdgeInsets.symmetric(
+                          vertical: 10, horizontal: 16),
+                      enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: const BorderSide(color: Colors.white)),
+                      focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: const BorderSide(color: Colors.white)),
+                    ),
+                  ),
+                ),
+                // 🔥 EXTREME UPLIFT: Shrunk the gap between search and tabs to just 6 pixels.
+                const SizedBox(height: 6),
+                // --- TABS ---
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                  child: Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.15),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                            child: _tabBtn(_text('active_crops_tab'), true)),
+                        Expanded(
+                            child: _tabBtn(_text('inactive_sold_tab'), false)),
+                      ],
+                    ),
+                  ),
+                ),
               ],
             ),
           ),
+
+          // --- STREAM LIST ---
           Expanded(
             child: StreamBuilder<List<Map<String, dynamic>>>(
-              key: ValueKey(_refreshTrigger),
+              key: ValueKey(_refreshTrigger), // 🛡️ CRITICAL: Busts the Cache
               stream: _client
                   .from('crops')
                   .stream(primaryKey: ['id'])
                   .eq('farmer_id', user.id)
                   .order('created_at', ascending: false),
               builder: (context, snapshot) {
-                if (!snapshot.hasData)
+                if (snapshot.connectionState == ConnectionState.waiting &&
+                    !snapshot.hasData) {
                   return Center(
                       child: CircularProgressIndicator(color: _primaryGreen));
+                }
 
-                final filtered = snapshot.data!.where((c) {
-                  final status = c['status'] ?? 'Active';
-                  // 👉 FARMER VIEW: Shows if Total Stock > 0.
-                  // Even if reserved, it is "Active" in farmer's eyes until sold.
-                  final double totalStock = (c['quantity_kg'] ?? 0).toDouble();
+                if (snapshot.hasError) {
+                  return Center(
+                      child: Text("Error loading crops.",
+                          style: GoogleFonts.poppins(color: Colors.red)));
+                }
+
+                final rawData = snapshot.data;
+                if (rawData == null || rawData.isEmpty) {
+                  return RefreshIndicator(
+                    onRefresh: _refreshList,
+                    color: _primaryGreen,
+                    child: ListView(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      children: [
+                        SizedBox(
+                            height: MediaQuery.of(context).size.height * 0.3),
+                        Center(
+                            child: Text(_text('no_crops_found'),
+                                style: GoogleFonts.poppins(
+                                    color: Colors.grey[500]))),
+                      ],
+                    ),
+                  );
+                }
+
+                // 🧠 FILTER LOGIC
+                final filtered = rawData.where((c) {
+                  final status = _safeStr(c['status'], 'Active');
+
+                  // Extract raw strings safely
+                  final String qtyKgStr = _safeStr(c['quantity_kg'], '0');
+                  final String fallbackQtyStr = _safeStr(c['quantity'], '0');
+
+                  // Strip letters, parse to double safely
+                  final double qtyKg = double.tryParse(
+                          qtyKgStr.replaceAll(RegExp(r'[^0-9.]'), '')) ??
+                      0.0;
+                  final double fallbackQty = double.tryParse(
+                          fallbackQtyStr.replaceAll(RegExp(r'[^0-9.]'), '')) ??
+                      0.0;
+
+                  // Always assume they have stock if Legacy Quantity exists, else use exact Kg logic
+                  final double totalStock = qtyKg > 0 ? qtyKg : fallbackQty;
+
+                  // Active logic: Status is good AND they physically have stock left
                   final isActiveGroup =
                       ['Active', 'Verified', 'Growing'].contains(status) &&
                           (totalStock > 0);
 
                   final matchesTab =
                       _showActive ? isActiveGroup : !isActiveGroup;
-                  final name = c['crop_name'] ?? '';
-                  final matchesSearch =
-                      name.toString().toLowerCase().contains(_searchQuery);
+
+                  final name = _safeStr(c['crop_name']).toLowerCase();
+                  final variety = _safeStr(c['variety']).toLowerCase();
+                  final matchesSearch = name.contains(_searchQuery) ||
+                      variety.contains(_searchQuery);
+
                   return matchesTab && matchesSearch;
                 }).toList();
 
                 if (filtered.isEmpty) {
                   return RefreshIndicator(
                     onRefresh: _refreshList,
+                    color: _primaryGreen,
                     child: ListView(
                       physics: const AlwaysScrollableScrollPhysics(),
                       children: [
                         SizedBox(
-                            height: MediaQuery.of(context).size.height * 0.2),
+                            height: MediaQuery.of(context).size.height * 0.3),
                         Center(
                             child: Text(_text('no_crops_found'),
                                 style: GoogleFonts.poppins(
@@ -190,10 +311,12 @@ class _MyCropsTabState extends State<MyCropsTab> {
                   onRefresh: _refreshList,
                   color: _primaryGreen,
                   child: ListView.separated(
-                    padding:
-                        const EdgeInsets.only(left: 16, right: 16, bottom: 80),
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    // 🔥 EXTREME UPLIFT: Reduced list top padding so cards pull up instantly.
+                    padding: const EdgeInsets.only(
+                        top: 8, left: 16, right: 16, bottom: 80),
                     itemCount: filtered.length,
-                    separatorBuilder: (_, __) => const SizedBox(height: 16),
+                    separatorBuilder: (_, __) => const SizedBox(height: 12),
                     itemBuilder: (ctx, i) =>
                         _buildLargeCard(filtered[i], langCode),
                   ),
@@ -206,93 +329,99 @@ class _MyCropsTabState extends State<MyCropsTab> {
     );
   }
 
+  // ---------------------------------------------------------------------------
+  // 🧩 WIDGET COMPONENTS
+  // ---------------------------------------------------------------------------
   Widget _tabBtn(String label, bool target) {
     bool isSel = _showActive == target;
     return GestureDetector(
-      onTap: () => setState(() => _showActive = target),
+      onTap: () {
+        HapticFeedback.selectionClick();
+        setState(() => _showActive = target);
+      },
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
         alignment: Alignment.center,
-        padding: const EdgeInsets.symmetric(vertical: 12),
+        padding: const EdgeInsets.symmetric(vertical: 10),
         decoration: BoxDecoration(
-          color: isSel ? _primaryGreen : Colors.white,
+          color: isSel ? Colors.white : Colors.transparent,
           borderRadius: BorderRadius.circular(10),
-          border:
-              isSel ? null : Border.all(color: Colors.grey.shade300, width: 1),
           boxShadow: isSel
               ? [
                   BoxShadow(
-                      color: _primaryGreen.withOpacity(0.3),
-                      blurRadius: 8,
-                      offset: const Offset(0, 4))
+                      color: Colors.black.withOpacity(0.05),
+                      blurRadius: 4,
+                      offset: const Offset(0, 2))
                 ]
               : null,
         ),
         child: Text(label,
             style: GoogleFonts.poppins(
-                color: isSel ? Colors.white : Colors.grey[600],
-                fontWeight: FontWeight.w600)),
+                color: isSel ? _primaryGreen : Colors.white.withOpacity(0.9),
+                fontSize: 13,
+                fontWeight: isSel ? FontWeight.bold : FontWeight.w600)),
       ),
     );
   }
 
   Widget _buildLargeCard(Map<String, dynamic> crop, String langCode) {
+    // --- IMAGE LOGIC ---
     ImageProvider imgProvider;
-    String? imgUrl = crop['image_url'];
-    if (imgUrl != null && imgUrl.isNotEmpty) {
-      if (imgUrl.startsWith('http'))
+    String imgUrl = _safeStr(crop['image_url']);
+    if (imgUrl.isNotEmpty) {
+      if (imgUrl.startsWith('http')) {
         imgProvider = NetworkImage(imgUrl);
-      else
+      } else {
         imgProvider = NetworkImage(
             _client.storage.from('crop_images').getPublicUrl(imgUrl));
+      }
     } else {
       imgProvider = const AssetImage('assets/images/placeholder_crop.png');
     }
 
-    final String name = crop['crop_name'] ?? 'Unknown Crop';
-    final String variety = crop['variety'] ?? 'Generic';
-    final String status = crop['status']?.toUpperCase() ?? "ACTIVE";
+    // --- DATA EXTRACTION ---
+    final String name = _safeStr(crop['crop_name'], 'Unknown Crop');
+    final String variety = _safeStr(crop['variety'], 'Generic');
+    final String status = _safeStr(crop['status'], 'ACTIVE').toUpperCase();
 
-    // --- 👉 GOLDEN RULE LOGIC ---
-    // 1. Read 'quantity_kg' (Total Stock).
-    // 2. Pending Orders increase 'reserved_kg', but NOT 'quantity_kg'.
-    // 3. Result: Farmer sees 100kg even if 10kg is pending.
-    String qtyValue = (crop['quantity_kg'] ?? 0).toString();
-    qtyValue = qtyValue.replaceAll(RegExp(r"([.]*0)(?!.*\d)"), "");
+    // Quantity Logic
+    String rawQty =
+        _safeStr(crop['quantity_kg'], _safeStr(crop['quantity'], '0'));
+    String qtyValue = rawQty.replaceAll(
+        RegExp(r"([.]*0)(?!.*\d)"), ""); // Remove trailing zeroes
 
-    String unit = crop['unit'] ?? "Unit";
-    if (unit == "Unit") {
-      String rawLegacy = crop['quantity']?.toString() ?? "";
-      if (rawLegacy.contains(' '))
-        unit = rawLegacy.split(' ').sublist(1).join(' ');
+    String unit = _safeStr(crop['unit'], 'Unit');
+    if (unit == 'Unit' && rawQty.contains(' ')) {
+      unit = rawQty.split(' ').sublist(1).join(' ');
     }
 
-    // Unit Localization
+    // Translate Units
     String displayUnit = unit;
     String lowerUnit = unit.toLowerCase();
     if (lowerUnit.contains('kg'))
-      displayUnit = _text('kg');
-    else if (lowerUnit.contains('quintal'))
-      displayUnit = _text('quintal');
-    else if (lowerUnit.contains('ton'))
-      displayUnit = _text('ton');
+      displayUnit = 'kg';
+    else if (lowerUnit.contains('quintal') || lowerUnit == 'q')
+      displayUnit = 'q';
+    else if (lowerUnit.contains('ton') || lowerUnit == 't')
+      displayUnit = 't';
     else if (lowerUnit.contains('crate'))
-      displayUnit = _text('crates');
+      displayUnit = 'crates';
     else
       displayUnit = _text(lowerUnit) == lowerUnit ? unit : _text(lowerUnit);
 
     String displayQty = "$qtyValue $displayUnit";
 
-    // --- PRICE PARSING ---
+    // Price Logic
     String priceVal =
-        crop['price']?.toString() ?? crop['price_per_qty']?.toString() ?? '0';
+        _safeStr(crop['price'], _safeStr(crop['price_per_qty'], '0'));
     priceVal = priceVal.replaceAll(RegExp(r"([.]*0)(?!.*\d)"), "");
     final String displayPrice = "₹$priceVal / $displayUnit";
 
-    final String harvestDate = _formatDate(crop['harvest_date']);
-    final String availDate = _formatDate(crop['available_from']);
+    final String harvestDate = _formatDate(_safeStr(crop['harvest_date']));
+    final String availDate = _formatDate(_safeStr(crop['available_from']));
     final String localizedStatus = _text(status.toLowerCase());
 
+    // Status Colors
     Color statusColor = Colors.green;
     if (status == 'SOLD')
       statusColor = Colors.red;
@@ -328,11 +457,32 @@ class _MyCropsTabState extends State<MyCropsTab> {
                           image: imgProvider, fit: BoxFit.cover)),
                 ),
               ),
+              // 🟢 STATUS ON TOP LEFT
+              Positioned(
+                top: 15,
+                left: 15,
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                      color: statusColor,
+                      borderRadius: BorderRadius.circular(20),
+                      boxShadow: const [
+                        BoxShadow(color: Colors.black12, blurRadius: 4)
+                      ]),
+                  child: Text(localizedStatus.toUpperCase(),
+                      style: GoogleFonts.poppins(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 11)),
+                ),
+              ),
+              // 🔴 DELETE ON TOP RIGHT
               Positioned(
                 top: 10,
-                left: 10,
+                right: 10,
                 child: InkWell(
-                  onTap: () => _deleteCrop(crop['id']),
+                  onTap: () => _deleteCrop(_safeStr(crop['id'])),
                   child: Container(
                     padding: const EdgeInsets.all(8),
                     decoration: const BoxDecoration(
@@ -346,23 +496,6 @@ class _MyCropsTabState extends State<MyCropsTab> {
                   ),
                 ),
               ),
-              Positioned(
-                  top: 15,
-                  right: 15,
-                  child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 6),
-                      decoration: BoxDecoration(
-                          color: statusColor,
-                          borderRadius: BorderRadius.circular(20),
-                          boxShadow: const [
-                            BoxShadow(color: Colors.black12, blurRadius: 4)
-                          ]),
-                      child: Text(localizedStatus.toUpperCase(),
-                          style: GoogleFonts.poppins(
-                              color: Colors.white,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 11)))),
             ],
           ),
           Padding(
@@ -382,9 +515,10 @@ class _MyCropsTabState extends State<MyCropsTab> {
                           future: TranslationService.toLocal(name, langCode),
                           initialData: name,
                           builder: (context, snapshot) => Text(
-                              snapshot.data ?? name,
-                              style: GoogleFonts.poppins(
-                                  fontSize: 16, fontWeight: FontWeight.bold)),
+                            snapshot.data ?? name,
+                            style: GoogleFonts.poppins(
+                                fontSize: 16, fontWeight: FontWeight.bold),
+                          ),
                         ),
                         Text(variety,
                             style: GoogleFonts.poppins(
@@ -415,6 +549,8 @@ class _MyCropsTabState extends State<MyCropsTab> {
                 _infoItem(Icons.event_available, _text('avail_from'), availDate,
                     Colors.purple),
                 const SizedBox(height: 12),
+
+                // --- ACTION BUTTONS ---
                 Row(
                   children: [
                     Expanded(
@@ -445,8 +581,9 @@ class _MyCropsTabState extends State<MyCropsTab> {
                                   context,
                                   MaterialPageRoute(
                                       builder: (_) =>
-                                          AddCropScreen(cropToEdit: crop)));
-                              _refreshList();
+                                          EditCropScreen(cropData: crop)));
+                              if (mounted)
+                                _refreshList(); // 🔄 Fetch fresh edit data!
                             },
                             style: OutlinedButton.styleFrom(
                                 side: const BorderSide(color: Colors.orange),
@@ -497,12 +634,13 @@ class _MyCropsTabState extends State<MyCropsTab> {
     );
   }
 
-  String _formatDate(String? dateStr) {
-    if (dateStr == null || dateStr.isEmpty) return "N/A";
+  // ✅ NUMERICAL DATE FORMATTER (DD/MM/YYYY)
+  String _formatDate(String dateStr) {
+    if (dateStr.isEmpty) return "N/A";
     try {
-      final d = DateTime.parse(dateStr);
-      return "${d.day}/${d.month}/${d.year}";
-    } catch (e) {
+      final d = DateTime.parse(dateStr).toLocal();
+      return DateFormat('dd/MM/yyyy').format(d);
+    } catch (_) {
       return "N/A";
     }
   }

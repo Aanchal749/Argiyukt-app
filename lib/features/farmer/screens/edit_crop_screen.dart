@@ -63,6 +63,7 @@ class _EditCropScreenState extends State<EditCropScreen> {
     "Grade C (Fair)"
   ];
   final List<String> _statusOptions = ['Active', 'Sold', 'Inactive'];
+  final List<String> _unitOptions = ["Kg", "Quintal (q)", "Ton", "Crates"];
 
   // --- CONTROLLERS ---
   String _status = 'Active';
@@ -88,72 +89,100 @@ class _EditCropScreenState extends State<EditCropScreen> {
   // ✅ Helper for Localized Text
   String _text(String key) => FarmerText.get(context, key);
 
+  String _safeString(dynamic value, [String fallback = '']) {
+    if (value == null) return fallback;
+    return value.toString().trim();
+  }
+
   @override
   void initState() {
     super.initState();
+    _qtyCtrl = TextEditingController(text: "0");
+    _priceCtrl = TextEditingController(text: "0");
+    _notesCtrl = TextEditingController(text: "");
+
     _prefillData();
+  }
+
+  @override
+  void dispose() {
+    _qtyCtrl.dispose();
+    _priceCtrl.dispose();
+    _notesCtrl.dispose();
+    super.dispose();
   }
 
   void _prefillData() {
     final c = widget.cropData;
 
-    String dbStatus = c['status'] ?? 'Active';
+    String dbStatus = _safeString(c['status'], 'Active');
     if (dbStatus.isNotEmpty) {
       dbStatus =
           dbStatus[0].toUpperCase() + dbStatus.substring(1).toLowerCase();
     }
     _status = _statusOptions.contains(dbStatus) ? dbStatus : 'Active';
 
-    String? dbCategory = c['category'];
-    _selectedCategory =
-        (dbCategory != null && _cropData.containsKey(dbCategory))
-            ? dbCategory
-            : null;
+    String dbCategory = _safeString(c['category']);
+    _selectedCategory = _cropData.containsKey(dbCategory) ? dbCategory : null;
 
-    String? dbCrop = c['crop_name'] ?? c['name'];
+    String dbCrop = _safeString(c['crop_name'], _safeString(c['name']));
     List<String> validCrops = _selectedCategory != null
         ? _cropData[_selectedCategory]!.keys.toList()
         : [];
-    _selectedCrop =
-        (dbCrop != null && validCrops.contains(dbCrop)) ? dbCrop : null;
+    _selectedCrop = validCrops.contains(dbCrop) ? dbCrop : null;
 
-    String? dbVariety = c['variety'];
+    String dbVariety = _safeString(c['variety']);
     List<String> validVarieties =
         (_selectedCategory != null && _selectedCrop != null)
             ? _cropData[_selectedCategory]![_selectedCrop]!
             : [];
-    _selectedVariety = (dbVariety != null && validVarieties.contains(dbVariety))
-        ? dbVariety
-        : null;
+    _selectedVariety = validVarieties.contains(dbVariety) ? dbVariety : null;
 
-    String? dbGrade = c['grade'];
-    _selectedGrade =
-        (dbGrade != null && _gradeOptions.contains(dbGrade)) ? dbGrade : null;
+    String dbGrade = _safeString(c['grade']);
+    _selectedGrade = _gradeOptions.contains(dbGrade) ? dbGrade : null;
 
-    _cropType = c['crop_type'] ?? "Organic";
+    _cropType = _safeString(c['crop_type'], "Organic");
+    if (!["Organic", "Inorganic"].contains(_cropType)) _cropType = "Organic";
 
-    String rawQty = c['quantity'] ?? "0 Kg";
+    // ✅ SMART PARSER: Checks for old vs new column names
+    String rawQty =
+        _safeString(c['quantity_kg'], _safeString(c['quantity'], "0"));
     String qtyVal = "0";
-    List<String> parts = rawQty.split(' ');
-    if (parts.length >= 2) {
-      qtyVal = parts[0];
-      String unit = parts.sublist(1).join(' ');
-      if (["Kg", "Quintal (q)", "Ton", "Crates"].contains(unit)) {
-        _selectedUnit = unit;
+    String parsedUnit = _safeString(c['unit'], "Quintal (q)");
+
+    if (rawQty.contains(' ') && c['unit'] == null) {
+      List<String> parts = rawQty.split(' ');
+      qtyVal = parts[0].replaceAll(RegExp(r'[^0-9.]'), '');
+      String unitPart = parts.sublist(1).join(' ').trim();
+
+      for (var u in _unitOptions) {
+        if (u.toLowerCase() == unitPart.toLowerCase()) {
+          parsedUnit = u;
+          break;
+        }
       }
     } else {
-      qtyVal = rawQty;
+      qtyVal = rawQty.replaceAll(RegExp(r'[^0-9.]'), '');
     }
+    if (qtyVal.isEmpty) qtyVal = "0";
 
-    _qtyCtrl = TextEditingController(text: qtyVal);
-    _priceCtrl = TextEditingController(text: (c['price'] ?? 0).toString());
-    _notesCtrl = TextEditingController(text: c['description'] ?? "");
-    _existingImageUrl = c['image_url'];
+    _selectedUnit = parsedUnit;
+    _qtyCtrl.text = qtyVal;
 
-    if (c['harvest_date'] != null)
-      _harvestDate = DateTime.parse(c['harvest_date']);
-    if (c['available_from'] != null)
-      _availableDate = DateTime.parse(c['available_from']);
+    _priceCtrl.text =
+        _safeString(c['price_per_qty'], _safeString(c['price'], '0'));
+    _notesCtrl.text = _safeString(c['description']);
+
+    String img = _safeString(c['image_url']);
+    _existingImageUrl = img.isNotEmpty ? img : null;
+
+    try {
+      String hDate = _safeString(c['harvest_date']);
+      if (hDate.isNotEmpty) _harvestDate = DateTime.tryParse(hDate);
+
+      String aDate = _safeString(c['available_from']);
+      if (aDate.isNotEmpty) _availableDate = DateTime.tryParse(aDate);
+    } catch (_) {}
   }
 
   Future<void> _pickImage(ImageSource source) async {
@@ -169,7 +198,7 @@ class _EditCropScreenState extends State<EditCropScreen> {
     }
   }
 
-  void _showImagePickerOptions() {
+  void _showImagePickerOptions(String uploadPhotoText) {
     showModalBottomSheet(
       context: context,
       shape: const RoundedRectangleBorder(
@@ -179,7 +208,7 @@ class _EditCropScreenState extends State<EditCropScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(_text('upload_crop_photo'), // ✅ LOCALIZED
+            Text(uploadPhotoText,
                 style: GoogleFonts.poppins(
                     fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 24),
@@ -222,13 +251,13 @@ class _EditCropScreenState extends State<EditCropScreen> {
     );
   }
 
-  Future<void> _updateCrop() async {
+  // 🛡️ CRITICAL FIX: The Intelligent Update Engine
+  Future<void> _updateCrop(String fillReqMsg, String updatedMsg) async {
     if (_selectedCrop == null ||
         _qtyCtrl.text.isEmpty ||
         _priceCtrl.text.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(_text('fill_required'), // ✅ LOCALIZED
-              style: GoogleFonts.poppins()),
+          content: Text(fillReqMsg, style: GoogleFonts.poppins()),
           backgroundColor: Colors.red));
       return;
     }
@@ -250,24 +279,46 @@ class _EditCropScreenState extends State<EditCropScreen> {
         imageUrl = fileName;
       }
 
-      // ✅ DYNAMIC TRANSLATION: Translate Notes to English for consistency
       String englishNotes = await TranslationService.toEnglish(_notesCtrl.text);
 
+      final double parsedQty =
+          double.tryParse(_qtyCtrl.text.replaceAll(RegExp(r'[^0-9.]'), '')) ??
+              0.0;
+      final double parsedPrice =
+          double.tryParse(_priceCtrl.text.replaceAll(RegExp(r'[^0-9.]'), '')) ??
+              0.0;
+
+      // Base Data that ALWAYS exists
       final Map<String, dynamic> data = {
         'crop_name': _selectedCrop,
         'category': _selectedCategory,
         'variety': _selectedVariety,
         'grade': _selectedGrade,
-        'quantity': "${_qtyCtrl.text} $_selectedUnit",
-        'price': double.tryParse(_priceCtrl.text) ?? 0,
+        'unit': _selectedUnit,
         'crop_type': _cropType,
-        'description': englishNotes, // ✅ Saved as English
-        'harvest_date': _harvestDate?.toIso8601String(),
-        'available_from': _availableDate?.toIso8601String(),
-        'image_url': imageUrl,
+        'description': englishNotes,
         'status': _status,
       };
 
+      // 🧠 DYNAMIC COLUMN TARGETING
+      // If the database gave us these columns, we must update them to ensure the UI changes.
+      if (widget.cropData.containsKey('quantity_kg'))
+        data['quantity_kg'] = parsedQty;
+      if (widget.cropData.containsKey('quantity'))
+        data['quantity'] = parsedQty; // Legacy fallback
+
+      if (widget.cropData.containsKey('price_per_qty'))
+        data['price_per_qty'] = parsedPrice;
+      if (widget.cropData.containsKey('price'))
+        data['price'] = parsedPrice; // Legacy fallback
+
+      if (imageUrl != null) data['image_url'] = imageUrl;
+      if (_harvestDate != null)
+        data['harvest_date'] = _harvestDate!.toIso8601String();
+      if (_availableDate != null)
+        data['available_from'] = _availableDate!.toIso8601String();
+
+      // EXECUTE UPDATE
       await Supabase.instance.client
           .from('crops')
           .update(data)
@@ -276,15 +327,15 @@ class _EditCropScreenState extends State<EditCropScreen> {
       if (mounted) {
         Navigator.pop(context, true);
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text(_text('crop_updated'), // ✅ LOCALIZED
-                style: GoogleFonts.poppins()),
+            content: Text(updatedMsg, style: GoogleFonts.poppins()),
             backgroundColor: Colors.green));
       }
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
             content: Text("Error: $e", style: GoogleFonts.poppins()),
             backgroundColor: Colors.red));
+      }
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -292,12 +343,17 @@ class _EditCropScreenState extends State<EditCropScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final String titleCropName =
+        _selectedCrop ?? _safeString(widget.cropData['crop_name'], 'Crop');
+
+    final String msgFillRequired = _text('fill_required');
+    final String msgCropUpdated = _text('crop_updated');
+    final String msgUploadPhoto = _text('upload_crop_photo');
+
     return Scaffold(
       backgroundColor: Colors.white,
       appBar: AppBar(
-        // ✅ LOCALIZED TITLE
-        title: Text(
-            "${_text('edit_crop')} (${widget.cropData['crop_name'] ?? 'Crop'})",
+        title: Text("${_text('edit_crop')} ($titleCropName)",
             style: GoogleFonts.poppins(fontWeight: FontWeight.bold)),
         backgroundColor: _primaryGreen,
         foregroundColor: Colors.white,
@@ -333,7 +389,7 @@ class _EditCropScreenState extends State<EditCropScreen> {
                               child: Text(
                                 _currentStep == 2
                                     ? _text('update_save')
-                                    : _text('next'), // ✅ LOCALIZED
+                                    : _text('next'),
                                 style: GoogleFonts.poppins(
                                     color: Colors.white,
                                     fontWeight: FontWeight.bold,
@@ -353,7 +409,7 @@ class _EditCropScreenState extends State<EditCropScreen> {
                                   shape: RoundedRectangleBorder(
                                       borderRadius: BorderRadius.circular(12)),
                                 ),
-                                child: Text(_text('back'), // ✅ LOCALIZED
+                                child: Text(_text('back'),
                                     style: GoogleFonts.poppins(
                                         color: Colors.black54,
                                         fontWeight: FontWeight.bold)),
@@ -365,32 +421,30 @@ class _EditCropScreenState extends State<EditCropScreen> {
                     );
                   },
                   onStepContinue: () {
-                    if (_currentStep < 2)
+                    if (_currentStep < 2) {
                       setState(() => _currentStep += 1);
-                    else
-                      _updateCrop();
+                    } else {
+                      _updateCrop(msgFillRequired, msgCropUpdated);
+                    }
                   },
                   onStepCancel: () {
                     if (_currentStep > 0) setState(() => _currentStep -= 1);
                   },
-                  steps: _getSteps(),
+                  steps: _getSteps(msgUploadPhoto),
                 ),
               ),
       ),
     );
   }
 
-  List<Step> _getSteps() {
+  List<Step> _getSteps(String msgUploadPhoto) {
     return [
       Step(
-        title: Text(_text('info'),
-            style: GoogleFonts.poppins(fontSize: 12)), // ✅ LOCALIZED
+        title: Text(_text('info'), style: GoogleFonts.poppins(fontSize: 12)),
         isActive: _currentStep >= 0,
         content: Column(
           children: [
             const SizedBox(height: 10),
-
-            // Status Dropdown
             Container(
               margin: const EdgeInsets.only(bottom: 20),
               padding: const EdgeInsets.all(12),
@@ -401,32 +455,25 @@ class _EditCropScreenState extends State<EditCropScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                      _text('current_status'), // ✅ LOCALIZED ("Current Status")
+                  Text(_text('current_status'),
                       style: GoogleFonts.poppins(
                           color: Colors.orange[800],
                           fontWeight: FontWeight.bold,
                           fontSize: 12)),
                   const SizedBox(height: 5),
-                  _dropdown(
-                      _text('status'),
-                      _status,
-                      _statusOptions, // ✅ LOCALIZED
+                  _dropdown(_text('status'), _status, _statusOptions,
                       (val) => setState(() => _status = val!)),
                 ],
               ),
             ),
-
             Row(children: [
               _typeButton("Organic", Colors.green),
               const SizedBox(width: 10),
               _typeButton("Inorganic", Colors.orange),
             ]),
             const SizedBox(height: 20),
-
             _dropdown("${_text('category')} *", _selectedCategory,
-                ['Vegetables', 'Fruits', 'Grains'], // ✅ LOCALIZED
-                (val) {
+                ['Vegetables', 'Fruits', 'Grains'], (val) {
               setState(() {
                 _selectedCategory = val;
                 _selectedCrop = null;
@@ -435,7 +482,7 @@ class _EditCropScreenState extends State<EditCropScreen> {
             }),
             const SizedBox(height: 16),
             _dropdown(
-                "${_text('crop_name')} *", // ✅ LOCALIZED
+                "${_text('crop_name')} *",
                 _selectedCrop,
                 _selectedCategory == null
                     ? []
@@ -447,41 +494,32 @@ class _EditCropScreenState extends State<EditCropScreen> {
             }),
             const SizedBox(height: 16),
             _dropdown(
-                _text('variety'), // ✅ LOCALIZED
+                _text('variety'),
                 _selectedVariety,
                 (_selectedCategory != null && _selectedCrop != null)
                     ? _cropData[_selectedCategory]![_selectedCrop]!
                     : [],
                 (val) => setState(() => _selectedVariety = val)),
             const SizedBox(height: 16),
-            _dropdown(
-                _text('grade'),
-                _selectedGrade,
-                _gradeOptions, // ✅ LOCALIZED
+            _dropdown(_text('grade'), _selectedGrade, _gradeOptions,
                 (val) => setState(() => _selectedGrade = val)),
           ],
         ),
       ),
       Step(
-        title: Text(_text('price'),
-            style: GoogleFonts.poppins(fontSize: 12)), // ✅ LOCALIZED
+        title: Text(_text('price'), style: GoogleFonts.poppins(fontSize: 12)),
         isActive: _currentStep >= 1,
         content: Column(
           children: [
             const SizedBox(height: 10),
-            _inputField("${_text('quantity_avail')} *", _qtyCtrl, // ✅ LOCALIZED
+            _inputField("${_text('quantity_avail')} *", _qtyCtrl,
                 type: TextInputType.number),
             const SizedBox(height: 16),
-            _dropdown(
-                _text('unit'), // ✅ LOCALIZED
-                _selectedUnit,
-                ["Kg", "Quintal (q)", "Ton", "Crates"],
+            _dropdown(_text('unit'), _selectedUnit, _unitOptions,
                 (val) => setState(() => _selectedUnit = val)),
             const SizedBox(height: 16),
-            _inputField(
-                "${_text('price_per_unit')} (₹) *", _priceCtrl, // ✅ LOCALIZED
-                type: TextInputType.number,
-                prefix: "₹"),
+            _inputField("${_text('price_per_unit')} (₹) *", _priceCtrl,
+                type: TextInputType.number, prefix: "₹"),
             const SizedBox(height: 20),
             if (_priceCtrl.text.isNotEmpty && _qtyCtrl.text.isNotEmpty)
               Container(
@@ -496,7 +534,7 @@ class _EditCropScreenState extends State<EditCropScreen> {
                     const SizedBox(width: 10),
                     Expanded(
                       child: Text(
-                          "${_text('total')}: ₹${(double.tryParse(_qtyCtrl.text) ?? 0 * (double.tryParse(_priceCtrl.text) ?? 0)).toStringAsFixed(0)}", // ✅ LOCALIZED
+                          "${_text('total')}: ₹${((double.tryParse(_qtyCtrl.text) ?? 0.0) * (double.tryParse(_priceCtrl.text) ?? 0.0)).toStringAsFixed(0)}",
                           style: GoogleFonts.poppins(
                               fontWeight: FontWeight.bold,
                               color: Colors.green[800],
@@ -509,16 +547,13 @@ class _EditCropScreenState extends State<EditCropScreen> {
         ),
       ),
       Step(
-        title: Text(_text('pic'),
-            style: GoogleFonts.poppins(fontSize: 12)), // ✅ LOCALIZED
+        title: Text(_text('pic'), style: GoogleFonts.poppins(fontSize: 12)),
         isActive: _currentStep >= 2,
         content: Column(
           children: [
             const SizedBox(height: 10),
-
-            // Image Box
             InkWell(
-              onTap: _showImagePickerOptions,
+              onTap: () => _showImagePickerOptions(msgUploadPhoto),
               borderRadius: BorderRadius.circular(12),
               child: Container(
                 height: 200,
@@ -559,7 +594,7 @@ class _EditCropScreenState extends State<EditCropScreen> {
                           const Icon(Icons.add_a_photo,
                               size: 40, color: Colors.grey),
                           const SizedBox(height: 8),
-                          Text(_text('tap_to_add_photo'), // ✅ LOCALIZED
+                          Text(_text('tap_to_add_photo'),
                               style: GoogleFonts.poppins(
                                   color: Colors.grey,
                                   fontWeight: FontWeight.bold))
@@ -583,28 +618,19 @@ class _EditCropScreenState extends State<EditCropScreen> {
                 ),
               ),
             ),
-
             const SizedBox(height: 20),
-
-            _datePicker(
-                _text('harvest_date'),
-                _harvestDate, // ✅ LOCALIZED
+            _datePicker(_text('harvest_date'), _harvestDate,
                 (d) => setState(() => _harvestDate = d)),
             const SizedBox(height: 12),
-            _datePicker(
-                _text('avail_from'),
-                _availableDate, // ✅ LOCALIZED
+            _datePicker(_text('avail_from'), _availableDate,
                 (d) => setState(() => _availableDate = d)),
-
             const SizedBox(height: 20),
-            _inputField(_text('notes'), _notesCtrl, maxLines: 3), // ✅ LOCALIZED
+            _inputField(_text('notes'), _notesCtrl, maxLines: 3),
           ],
         ),
       ),
     ];
   }
-
-  // --- WIDGET HELPERS ---
 
   Widget _typeButton(String type, Color color) {
     bool isSelected = _cropType == type;
@@ -642,10 +668,7 @@ class _EditCropScreenState extends State<EditCropScreen> {
 
   Widget _dropdown(String label, String? value, List<String> items,
       Function(String?) onChanged) {
-    if (value != null && !items.contains(value)) {
-      value = null;
-    }
-
+    if (value != null && !items.contains(value)) value = null;
     return DropdownButtonFormField<String>(
       value: value,
       isExpanded: true,
@@ -675,6 +698,7 @@ class _EditCropScreenState extends State<EditCropScreen> {
       keyboardType: type,
       maxLines: maxLines,
       style: GoogleFonts.poppins(),
+      onChanged: (val) => setState(() {}),
       decoration: InputDecoration(
         labelText: label,
         labelStyle: GoogleFonts.poppins(),
@@ -693,7 +717,7 @@ class _EditCropScreenState extends State<EditCropScreen> {
       onTap: () async {
         final d = await showDatePicker(
             context: context,
-            initialDate: DateTime.now(),
+            initialDate: date ?? DateTime.now(),
             firstDate: DateTime(2020),
             lastDate: DateTime(2030));
         if (d != null) onConfirm(d);

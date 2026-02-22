@@ -1,18 +1,15 @@
 import 'dart:async';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:intl/intl.dart';
-import 'package:geolocator/geolocator.dart';
+import 'package:geolocator/geolocator.dart'; // Only used for distance math now
+import 'package:cached_network_image/cached_network_image.dart';
 
-// ✅ Logic Imports
 import 'package:agriyukt_app/features/common/screens/chat_screen.dart';
-import 'full_screen_tracking.dart';
-
-// ✅ Localization
-import 'package:agriyukt_app/features/farmer/farmer_translations.dart';
-import 'package:agriyukt_app/core/providers/language_provider.dart';
+import 'package:agriyukt_app/features/farmer/screens/full_screen_tracking.dart';
 
 class FarmerOrderDetailScreen extends StatefulWidget {
   final Map<String, dynamic>? order;
@@ -25,227 +22,528 @@ class FarmerOrderDetailScreen extends StatefulWidget {
       _FarmerOrderDetailScreenState();
 }
 
-class _FarmerOrderDetailScreenState extends State<FarmerOrderDetailScreen> {
+class _FarmerOrderDetailScreenState extends State<FarmerOrderDetailScreen>
+    with SingleTickerProviderStateMixin {
   final _supabase = Supabase.instance.client;
-  bool _isLoading = true;
-  bool _isUpdating = false;
-  Map<String, dynamic>? _order;
 
-  // ✅ VISUALS: Exact Colors from Buyer Screen
-  final Color _primaryGreen = const Color(0xFF2E7D32);
-  final Color _bgGrey = const Color(0xFFF4F7F6);
-  final Color _textDark = const Color(0xFF1A1A1A);
-  final Color _textGrey = const Color(0xFF757575);
+  bool _isLoading = true;
+  bool _isUpdatingStatus = false;
+  Map<String, dynamic>? _order;
+  late final String _targetOrderId;
+
+  // ✅ PRODUCTION FIX: Removed active GPS tracking from Farmer.
+  // Farmer acts as a passive radar, listening to the DB via Realtime.
+  RealtimeChannel? _orderChannel;
+  final ValueNotifier<bool> _isSharingNotifier = ValueNotifier<bool>(false);
+  final ValueNotifier<double?> _distanceNotifier = ValueNotifier<double?>(null);
+  final ValueNotifier<double> _progressNotifier = ValueNotifier<double>(0.0);
+
+  // Signature Farmer Theme
+  static const Color _primaryGreen = Color(0xFF1B5E20);
+  static const Color _surfaceBg = Color(0xFFF4F6F8);
 
   @override
   void initState() {
     super.initState();
+    _targetOrderId = widget.orderId ?? widget.order?['id']?.toString() ?? '';
     _fetchOrderDetails();
+    _setupRealtimeSubscription();
   }
 
-  String _text(String key) => FarmerText.get(context, key);
+  @override
+  void dispose() {
+    _orderChannel?.unsubscribe();
+    _isSharingNotifier.dispose();
+    _distanceNotifier.dispose();
+    _progressNotifier.dispose();
+    super.dispose();
+  }
 
+  // ---------------------------------------------------------------------------
+  // 📦 DATA FETCHING ENGINE
+  // ---------------------------------------------------------------------------
   Future<void> _fetchOrderDetails() async {
-    final idToFetch = widget.orderId ?? widget.order?['id'];
-    if (idToFetch == null) return;
-
+    if (_targetOrderId.isEmpty) return;
     try {
+      // ✅ DB FIX: Explicitly naming foreign keys bypasses Ambiguous Join crashes
       final data = await _supabase.from('orders').select('''
               *,
-              buyer:profiles!buyer_id(id, first_name, last_name, phone, district, state),
-              farmer:profiles!farmer_id(latitude, longitude),
-              crop:crops!crop_id(image_url, crop_name, variety, harvest_date, unit, grade, price) 
-          ''').eq('id', idToFetch).single();
+              buyer:profiles!orders_buyer_id_fkey(id, first_name, last_name, district, state, latitude, longitude),
+              farmer:profiles!orders_farmer_id_fkey(latitude, longitude),
+              crop:crops!orders_crop_id_fkey(image_url, crop_name, unit, variety, grade, harvest_date, price, description)
+          ''').eq('id', _targetOrderId).single();
 
       if (mounted) {
         setState(() {
           _order = data;
           _isLoading = false;
         });
+
+        // The Farmer simply listens to the 'is_sharing_location' flag set by the Buyer
+        _isSharingNotifier.value = data['is_sharing_location'] ?? false;
+        _updateDistanceLocally();
       }
     } catch (e) {
+      debugPrint("Fetch Error: $e");
       if (mounted) setState(() => _isLoading = false);
     }
   }
 
-  Future<void> _updateStatus(String newStatus) async {
-    String mainStatus = (newStatus == 'Rejected')
-        ? 'Rejected'
-        : (newStatus == 'Completed' ? 'Completed' : 'Accepted');
+  // ✅ REALTIME RADAR: Silently fetches new data when Buyer's GPS updates the row
+  void _setupRealtimeSubscription() {
+    if (_targetOrderId.isEmpty) return;
+    _orderChannel = _supabase
+        .channel('public:orders:$_targetOrderId')
+        .onPostgresChanges(
+          event: PostgresChangeEvent.update,
+          schema: 'public',
+          table: 'orders',
+          filter: PostgresChangeFilter(
+              type: PostgresChangeFilterType.eq,
+              column: 'id',
+              value: _targetOrderId),
+          callback: (payload) {
+            if (mounted) _fetchOrderDetails();
+          },
+        )
+        .subscribe();
+  }
 
-    setState(() => _isUpdating = true);
+  // ---------------------------------------------------------------------------
+  // 🛰️ PASSIVE DISTANCE ENGINE
+  // ---------------------------------------------------------------------------
+  void _updateDistanceLocally() {
+    if (_order == null || !mounted) return;
 
-    try {
-      await _supabase.from('orders').update({
-        'status': mainStatus,
-        'tracking_status': newStatus,
-        if (newStatus == 'Completed') 'is_sharing_location': false
-      }).eq('id', _order!['id']);
+    final farmer = _order!['farmer'] is Map ? _order!['farmer'] : {};
+    final buyer = _order!['buyer'] is Map ? _order!['buyer'] : {};
 
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text("${_text('status_updated')}: $newStatus"),
-            backgroundColor: _primaryGreen));
-        _fetchOrderDetails();
-      }
-    } catch (e) {
-      if (mounted) _fetchOrderDetails();
-    } finally {
-      if (mounted) setState(() => _isUpdating = false);
+    // Farmer is stationary
+    double? fLat = (farmer['latitude'] as num?)?.toDouble();
+    double? fLng = (farmer['longitude'] as num?)?.toDouble();
+
+    // Buyer is moving (Check order table live coords first, fallback to static profile)
+    double? bLat = (_order!['buyer_lat'] as num?)?.toDouble() ??
+        (buyer['latitude'] as num?)?.toDouble();
+    double? bLng = (_order!['buyer_lng'] as num?)?.toDouble() ??
+        (buyer['longitude'] as num?)?.toDouble();
+
+    // Ensure valid coordinates before math
+    if (fLat != null &&
+        fLng != null &&
+        bLat != null &&
+        bLng != null &&
+        bLat != 0.0 &&
+        fLat != 0.0) {
+      double distMeters = Geolocator.distanceBetween(fLat, fLng, bLat, bLng);
+      _distanceNotifier.value = distMeters;
+      _progressNotifier.value = (1.0 - (distMeters / 10000)).clamp(0.0, 1.0);
+    } else {
+      _distanceNotifier.value = null;
     }
   }
 
-  // --- UI BUILD ---
+  // ---------------------------------------------------------------------------
+  // 🛡️ STRICT STATE MACHINE
+  // ---------------------------------------------------------------------------
+  Future<void> _updateStatus(String newStatus) async {
+    HapticFeedback.heavyImpact();
+    if (mounted) setState(() => _isUpdatingStatus = true);
+
+    String mainStatus = newStatus.toLowerCase();
+    // Maintain core tracking state
+    if (['packed', 'shipped', 'in transit', 'out for delivery']
+        .contains(mainStatus)) {
+      mainStatus = 'accepted';
+    }
+
+    try {
+      await _supabase
+          .from('orders')
+          .update({'status': mainStatus, 'tracking_status': newStatus}).eq(
+              'id', _targetOrderId);
+
+      await _fetchOrderDetails();
+      if (mounted) _showSnack("Order updated to $newStatus", _primaryGreen);
+    } catch (e) {
+      if (mounted)
+        _showSnack("Update failed. Check connection.", Colors.red.shade700);
+    } finally {
+      if (mounted) setState(() => _isUpdatingStatus = false);
+    }
+  }
+
+  Future<void> _promptForOTP() async {
+    final TextEditingController otpController = TextEditingController();
+
+    String fallbackOtp = _targetOrderId.replaceAll(RegExp(r'[^0-9]'), '');
+    fallbackOtp = fallbackOtp.length >= 4
+        ? fallbackOtp.substring(0, 4)
+        : fallbackOtp.padRight(4, '0');
+    final String correctOtp =
+        _order!['delivery_otp']?.toString() ?? fallbackOtp;
+
+    bool? isVerified = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        backgroundColor: Colors.white,
+        surfaceTintColor: Colors.transparent,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Text("Verify Handover",
+            style: GoogleFonts.poppins(fontWeight: FontWeight.bold)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+                "Ask the buyer for their 4-digit Delivery OTP to complete the handover.",
+                style: GoogleFonts.poppins(
+                    fontSize: 13, color: Colors.grey.shade600)),
+            const SizedBox(height: 20),
+            TextField(
+              controller: otpController,
+              keyboardType: TextInputType.number,
+              maxLength: 4,
+              textAlign: TextAlign.center,
+              style: GoogleFonts.jetBrainsMono(
+                  fontSize: 24, fontWeight: FontWeight.bold, letterSpacing: 8),
+              decoration: InputDecoration(
+                counterText: "",
+                hintText: "0000",
+                border:
+                    OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide:
+                        const BorderSide(color: _primaryGreen, width: 2)),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text("Cancel",
+                style: GoogleFonts.poppins(
+                    color: Colors.grey.shade600, fontWeight: FontWeight.bold)),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              if (otpController.text.trim() == correctOtp) {
+                Navigator.pop(context, true);
+              } else {
+                HapticFeedback.heavyImpact();
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                    content: Text("Invalid OTP", style: GoogleFonts.poppins()),
+                    backgroundColor: Colors.red.shade700,
+                    behavior: SnackBarBehavior.floating));
+              }
+            },
+            style: ElevatedButton.styleFrom(
+                backgroundColor: _primaryGreen,
+                elevation: 0,
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12))),
+            child: Text("Verify",
+                style: GoogleFonts.poppins(
+                    color: Colors.white, fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+
+    if (isVerified == true) {
+      await _updateStatus('delivered');
+    }
+  }
+
+  void _showSnack(String msg, Color color) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content:
+          Text(msg, style: GoogleFonts.poppins(fontWeight: FontWeight.w500)),
+      backgroundColor: color,
+      behavior: SnackBarBehavior.floating,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+    ));
+  }
+
+  // ---------------------------------------------------------------------------
+  // 🖥️ UI BUILD (Untouched Structure)
+  // ---------------------------------------------------------------------------
   @override
   Widget build(BuildContext context) {
     if (_isLoading) {
-      return Scaffold(
-          backgroundColor: _bgGrey,
-          body: const Center(child: CircularProgressIndicator()));
+      return const Scaffold(
+          backgroundColor: _surfaceBg,
+          body: SafeArea(child: _OrderDetailsSkeleton()));
     }
     if (_order == null) {
-      return const Scaffold(body: Center(child: Text("Order Not Found")));
+      return Scaffold(
+          backgroundColor: _surfaceBg,
+          body: Center(
+              child: Text("Order not found", style: GoogleFonts.poppins())));
     }
 
-    // Parsing Data
-    final buyer = _order!['buyer'] ?? {};
-    final farmer = _order!['farmer'] ?? {};
-    final crop = _order!['crop'] ?? {};
-
-    // ✅ Buyer Info logic
+    final rawBuyer = _order!['buyer'];
+    final buyer = rawBuyer is Map
+        ? rawBuyer
+        : (rawBuyer is List && rawBuyer.isNotEmpty ? rawBuyer[0] : {});
     final String buyerName =
         "${buyer['first_name'] ?? 'Buyer'} ${buyer['last_name'] ?? ''}".trim();
+    final String buyerLoc =
+        "${buyer['district'] ?? ''}, ${buyer['state'] ?? ''}"
+            .replaceAll(RegExp(r'^, |,$'), '')
+            .trim();
+    final String buyerId = buyer['id']?.toString() ?? '';
 
-    String dist = buyer['district'] ?? '';
-    String st = buyer['state'] ?? '';
-    String buyerLoc = "";
-    if (dist.isNotEmpty && st.isNotEmpty) {
-      buyerLoc = "$dist, $st";
-    } else if (dist.isNotEmpty) {
-      buyerLoc = dist;
-    } else {
-      buyerLoc = "Location N/A";
-    }
+    final rawFarmer = _order!['farmer'];
+    final farmer = rawFarmer is Map
+        ? rawFarmer
+        : (rawFarmer is List && rawFarmer.isNotEmpty ? rawFarmer[0] : {});
 
-    final String buyerId = buyer['id'] ?? '';
+    final rawCrop = _order!['crop'];
+    final crop = rawCrop is Map
+        ? rawCrop
+        : (rawCrop is List && rawCrop.isNotEmpty ? rawCrop[0] : {});
 
-    // Crop Info (detailed)
-    String cropName = crop['crop_name'] ?? _order!['crop_name'] ?? "Crop";
-    String variety = crop['variety'] ?? 'Standard';
-    if (variety.toLowerCase().contains('premium')) variety = 'Prem';
-    String grade = crop['grade'] ?? 'Standard';
+    String cropName = crop['crop_name'] ?? _order!['crop_name'] ?? "Crop Item";
+    String? imgUrl = crop['image_url'];
+    String cropVariety = crop['variety'] ?? _order!['variety'] ?? '';
+    String cropGrade = crop['grade'] ?? _order!['grade'] ?? '';
     String unit = crop['unit'] ?? 'Kg';
 
-    // Price per unit
-    double pricePerUnit =
-        (double.tryParse(_order!['price_offered']?.toString() ?? "0") ??
-            (crop['price'] ?? 0).toDouble());
-
-    String dateText = "Available";
+    String harvestDate = "Available";
     if (crop['harvest_date'] != null) {
       try {
-        dateText =
+        harvestDate =
             DateFormat('dd MMM').format(DateTime.parse(crop['harvest_date']));
       } catch (_) {}
     }
 
-    // Image Logic
-    String? rawImgUrl = crop['image_url'];
-    ImageProvider imgProvider;
-    if (rawImgUrl != null && rawImgUrl.isNotEmpty) {
-      if (rawImgUrl.startsWith('http')) {
-        imgProvider = NetworkImage(rawImgUrl);
-      } else {
-        imgProvider = NetworkImage(
-            _supabase.storage.from('crop_images').getPublicUrl(rawImgUrl));
-      }
-    } else {
-      imgProvider = const AssetImage('assets/images/placeholder_crop.png');
-    }
+    final quantity =
+        (num.tryParse(_order!['quantity_kg']?.toString() ?? '0') ?? 0)
+            .toDouble();
+    final price = (num.tryParse(_order!['price_offered']?.toString() ??
+                crop['price']?.toString() ??
+                '0') ??
+            0)
+        .toDouble();
+    final totalAmount = quantity * price;
+    final advancePaid =
+        (num.tryParse(_order!['advance_amount']?.toString() ?? '0') ?? 0)
+            .toDouble();
 
-    // Money
-    final double qty =
-        (double.tryParse(_order!['quantity_kg']?.toString() ?? "0") ?? 0);
-    final double totalAmount = qty * pricePerUnit;
-    final double paidAmount =
-        (double.tryParse(_order!['advance_amount']?.toString() ?? "0") ?? 0);
+    String rawStatus =
+        _order!['tracking_status'] ?? _order!['status'] ?? 'Pending';
+    String status = rawStatus.toString().toLowerCase().trim();
 
-    // Tracking
+    final isPending = ['pending', 'requested'].contains(status);
+    final isCancelled = ['rejected', 'cancelled'].contains(status);
+    final isDelivered = ['delivered', 'completed'].contains(status);
+
     final double fLat = (farmer['latitude'] as num?)?.toDouble() ?? 0.0;
     final double fLng = (farmer['longitude'] as num?)?.toDouble() ?? 0.0;
-    final double bLat = (_order!['buyer_lat'] as num?)?.toDouble() ?? 0.0;
-    final double bLng = (_order!['buyer_lng'] as num?)?.toDouble() ?? 0.0;
-    final bool isSharing = _order!['is_sharing_location'] ?? false;
+    final double bLat = (buyer['latitude'] as num?)?.toDouble() ??
+        (_order!['buyer_lat'] as num?)?.toDouble() ??
+        0.0;
+    final double bLng = (buyer['longitude'] as num?)?.toDouble() ??
+        (_order!['buyer_lng'] as num?)?.toDouble() ??
+        0.0;
 
-    final status = _order!['tracking_status'] ?? _order!['status'] ?? 'Pending';
-    final scheduleText = _order!['scheduled_pickup_time'] != null
-        ? DateFormat('dd MMM, hh:mm a')
-            .format(DateTime.parse(_order!['scheduled_pickup_time']).toLocal())
-        : "Not Scheduled";
-
-    // Dynamic padding setup based on status buttons rendering height
-    final double bottomSafeArea = MediaQuery.of(context).padding.bottom;
-    final double scrollPadding =
-        (status == 'Pending' || status == 'Ordered') ? 200 : 140;
+    double bottomPadding = (isCancelled || isDelivered) ? 40 : 120;
 
     return Scaffold(
-      backgroundColor: _bgGrey,
+      backgroundColor: _surfaceBg,
       appBar: AppBar(
-        title: Text(_text('manage_order'),
+        title: Text("Order Details",
             style: GoogleFonts.poppins(
-                color: _textDark, fontWeight: FontWeight.bold)),
-        backgroundColor: _bgGrey,
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+                fontSize: 20)),
+        backgroundColor: _primaryGreen,
         elevation: 0,
-        centerTitle: true,
-        leading: IconButton(
-            icon: const Icon(Icons.arrow_back, color: Colors.black),
-            onPressed: () => Navigator.pop(context)),
+        centerTitle: false,
+        iconTheme: const IconThemeData(color: Colors.white),
       ),
       body: SafeArea(
-        child: Stack(
-          children: [
-            SingleChildScrollView(
-              padding:
-                  EdgeInsets.fromLTRB(0, 10, 0, scrollPadding + bottomSafeArea),
-              child: Column(
-                children: [
-                  // 1. PRODUCT CARD
-                  _buildProductCard(cropName, variety, grade, dateText,
-                      pricePerUnit, unit, status, imgProvider),
-                  const SizedBox(height: 12),
-
-                  // 2. BREAKDOWN CARD
-                  _buildBreakdownCard(qty, unit, totalAmount, paidAmount),
-                  const SizedBox(height: 12),
-
-                  // 3. SCHEDULE CARD
-                  _buildScheduleCard(scheduleText),
-                  const SizedBox(height: 12),
-
-                  // 4. TRACKING/MAP CARD
-                  _buildTrackingBlock(
-                      status, isSharing, fLat, fLng, bLat, bLng, scheduleText),
-                  const SizedBox(height: 12),
-
-                  // ✅ 5. CONTACT CARD (Call button removed)
-                  _buildContactCard("Buyer", buyerName, buyerLoc, status,
-                      cropName, buyerId, Colors.blue.shade100),
-                ],
-              ),
-            ),
-
-            // ✅ BOTTOM ACTION BAR
-            _buildBottomPanel(status, bottomSafeArea),
-          ],
+        child: SingleChildScrollView(
+          padding: EdgeInsets.fromLTRB(0, 16, 0, bottomPadding),
+          physics: const BouncingScrollPhysics(),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _buildProductCard(crop, cropName, cropVariety, cropGrade,
+                  harvestDate, price, unit, rawStatus, imgUrl),
+              const SizedBox(height: 16),
+              _buildBreakdownCard(quantity, totalAmount, advancePaid),
+              const SizedBox(height: 16),
+              if (!isPending && !isCancelled) ...[
+                ValueListenableBuilder<bool>(
+                    valueListenable: _isSharingNotifier,
+                    builder: (context, isSharing, child) {
+                      return _buildTrackingBlock(
+                          rawStatus, isSharing, fLat, fLng, bLat, bLng);
+                    }),
+                const SizedBox(height: 16),
+              ],
+              _buildContactCard(
+                  buyerName, buyerLoc, rawStatus, cropName, buyerId),
+            ],
+          ),
         ),
+      ),
+
+      // ✅ ACTION ENGINE (Corrected Logic: Farmer Packs, then waits for Buyer)
+      bottomNavigationBar: AnimatedSize(
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOutCubic,
+        child: (isCancelled || isDelivered)
+            ? const SizedBox.shrink()
+            : SafeArea(
+                child: Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                      color: Colors.white,
+                      border:
+                          Border(top: BorderSide(color: Colors.grey.shade200)),
+                      boxShadow: [
+                        BoxShadow(
+                            color: Colors.black.withOpacity(0.02),
+                            blurRadius: 10,
+                            offset: const Offset(0, -2))
+                      ]),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (isPending)
+                        Row(
+                          children: [
+                            Expanded(
+                              child: SizedBox(
+                                height: 52,
+                                child: OutlinedButton(
+                                  onPressed: _isUpdatingStatus
+                                      ? null
+                                      : () => _updateStatus('rejected'),
+                                  style: OutlinedButton.styleFrom(
+                                      foregroundColor: Colors.red.shade700,
+                                      side: BorderSide(
+                                          color: Colors.red.shade300),
+                                      shape: RoundedRectangleBorder(
+                                          borderRadius:
+                                              BorderRadius.circular(16))),
+                                  child: AnimatedSwitcher(
+                                    duration: const Duration(milliseconds: 200),
+                                    child: _isUpdatingStatus
+                                        ? const SizedBox(
+                                            height: 20,
+                                            width: 20,
+                                            child: CircularProgressIndicator(
+                                                color: Colors.red,
+                                                strokeWidth: 2))
+                                        : Text("Reject",
+                                            style: GoogleFonts.poppins(
+                                                fontWeight: FontWeight.bold,
+                                                fontSize: 15)),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: SizedBox(
+                                height: 52,
+                                child: ElevatedButton(
+                                  onPressed: _isUpdatingStatus
+                                      ? null
+                                      : () => _updateStatus('accepted'),
+                                  style: ElevatedButton.styleFrom(
+                                      backgroundColor: _primaryGreen,
+                                      elevation: 0,
+                                      shape: RoundedRectangleBorder(
+                                          borderRadius:
+                                              BorderRadius.circular(16))),
+                                  child: AnimatedSwitcher(
+                                    duration: const Duration(milliseconds: 200),
+                                    child: _isUpdatingStatus
+                                        ? const SizedBox(
+                                            height: 20,
+                                            width: 20,
+                                            child: CircularProgressIndicator(
+                                                color: Colors.white,
+                                                strokeWidth: 2))
+                                        : Text("Accept",
+                                            style: GoogleFonts.poppins(
+                                                color: Colors.white,
+                                                fontWeight: FontWeight.bold,
+                                                fontSize: 15)),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        )
+                      else ...[
+                        SizedBox(
+                          width: double.infinity,
+                          height: 52,
+                          child: ElevatedButton(
+                            onPressed: _isUpdatingStatus
+                                ? null
+                                : () async {
+                                    if (status == 'accepted' ||
+                                        status == 'confirmed') {
+                                      await _updateStatus('packed');
+                                    } else if ([
+                                      'packed',
+                                      'shipped',
+                                      'in transit',
+                                      'out for delivery'
+                                    ].contains(status)) {
+                                      await _promptForOTP();
+                                    }
+                                  },
+                            style: ElevatedButton.styleFrom(
+                                backgroundColor: _primaryGreen,
+                                elevation: 0,
+                                shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(16))),
+                            child: AnimatedSwitcher(
+                              duration: const Duration(milliseconds: 200),
+                              child: _isUpdatingStatus
+                                  ? const SizedBox(
+                                      height: 20,
+                                      width: 20,
+                                      child: CircularProgressIndicator(
+                                          color: Colors.white, strokeWidth: 2))
+                                  : Text(
+                                      (status == 'accepted' ||
+                                              status == 'confirmed')
+                                          ? "Mark as Packed"
+                                          : "Verify OTP & Handover",
+                                      key: ValueKey(status),
+                                      style: GoogleFonts.poppins(
+                                          fontWeight: FontWeight.bold,
+                                          color: Colors.white,
+                                          fontSize: 15,
+                                          letterSpacing: 0.5)),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
       ),
     );
   }
 
   // --- WIDGETS ---
 
-  // ✅ Enhanced product card with price, variety, grade, harvest
   Widget _buildProductCard(
+      Map<String, dynamic> cropMap,
       String name,
       String variety,
       String grade,
@@ -253,48 +551,99 @@ class _FarmerOrderDetailScreenState extends State<FarmerOrderDetailScreen> {
       double pricePerUnit,
       String unit,
       String status,
-      ImageProvider img) {
+      String? rawImgUrl) {
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.symmetric(horizontal: 16),
-      padding: const EdgeInsets.all(24),
+      padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(20),
-          boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 5)]),
+          border: Border.all(color: Colors.grey.shade200),
+          boxShadow: [
+            BoxShadow(
+                color: Colors.black.withOpacity(0.03),
+                blurRadius: 15,
+                offset: const Offset(0, 5))
+          ]),
       child: Row(children: [
-        ClipRRect(
-            borderRadius: BorderRadius.circular(16),
-            child: SizedBox(
-                height: 110,
-                width: 110,
-                child: Image(image: img, fit: BoxFit.cover))),
+        GestureDetector(
+          onTap: () {
+            HapticFeedback.lightImpact();
+            Navigator.push(
+                context,
+                PageRouteBuilder(
+                  transitionDuration: const Duration(milliseconds: 300),
+                  pageBuilder: (_, __, ___) => _CropDetailScreen(
+                      crop: cropMap,
+                      imgUrl: rawImgUrl,
+                      heroTag: 'farmer_order_img_$_targetOrderId'),
+                  transitionsBuilder: (_, anim, __, child) =>
+                      FadeTransition(opacity: anim, child: child),
+                ));
+          },
+          child: Container(
+            height: 100,
+            width: 100,
+            decoration: BoxDecoration(
+                color: Colors.grey.shade100,
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: Colors.grey.shade200)),
+            child: Material(
+              color: Colors.transparent,
+              borderRadius: BorderRadius.circular(15),
+              child: ClipRRect(
+                  borderRadius: BorderRadius.circular(15),
+                  child: Hero(
+                    tag: 'farmer_order_img_$_targetOrderId',
+                    child: (rawImgUrl != null && rawImgUrl.isNotEmpty)
+                        ? CachedNetworkImage(
+                            imageUrl: rawImgUrl.startsWith('http')
+                                ? rawImgUrl
+                                : _supabase.storage
+                                    .from('crop_images')
+                                    .getPublicUrl(rawImgUrl),
+                            fit: BoxFit.cover,
+                            memCacheWidth: 250,
+                            placeholder: (c, u) =>
+                                Container(color: Colors.grey.shade100),
+                            errorWidget: (c, u, e) => const Icon(
+                                Icons.image_not_supported,
+                                color: Colors.grey))
+                        : Image.asset('assets/images/placeholder_crop.png',
+                            fit: BoxFit.cover),
+                  )),
+            ),
+          ),
+        ),
         const SizedBox(width: 20),
         Expanded(
             child:
                 Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text(name,
-              style:
-                  const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 6),
+              style: GoogleFonts.poppins(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.black87,
+                  height: 1.2)),
+          const SizedBox(height: 4),
           Text("$variety • $grade",
-              style: TextStyle(color: Colors.grey[700], fontSize: 13)),
+              style: GoogleFonts.poppins(
+                  color: Colors.grey.shade600, fontSize: 13)),
           Text("Harvest: $date",
-              style: TextStyle(color: Colors.grey[700], fontSize: 13)),
-          const SizedBox(height: 10),
+              style: GoogleFonts.poppins(
+                  color: Colors.grey.shade600, fontSize: 13)),
+          const SizedBox(height: 12),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Flexible(
-                child: Text(
-                  "₹${pricePerUnit.toStringAsFixed(0)} / $unit",
-                  style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                      color: _primaryGreen),
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
+                  child: Text("₹${pricePerUnit.toStringAsFixed(0)} / $unit",
+                      style: GoogleFonts.jetBrainsMono(
+                          fontSize: 15,
+                          fontWeight: FontWeight.bold,
+                          color: _primaryGreen),
+                      overflow: TextOverflow.ellipsis)),
               _buildStatusBadge(status)
             ],
           )
@@ -303,8 +652,7 @@ class _FarmerOrderDetailScreenState extends State<FarmerOrderDetailScreen> {
     );
   }
 
-  Widget _buildBreakdownCard(
-      double qty, String unit, double total, double paid) {
+  Widget _buildBreakdownCard(double qty, double total, double paid) {
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.symmetric(horizontal: 16),
@@ -312,60 +660,35 @@ class _FarmerOrderDetailScreenState extends State<FarmerOrderDetailScreen> {
       decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: Colors.grey.shade200)),
+          border: Border.all(color: Colors.grey.shade200),
+          boxShadow: [
+            BoxShadow(
+                color: Colors.black.withOpacity(0.03),
+                blurRadius: 15,
+                offset: const Offset(0, 5))
+          ]),
       child: Column(children: [
-        _row(_text('quantity'), "$qty $unit"),
-        const SizedBox(height: 8),
-        _row(_text('total'), "₹${NumberFormat('#,##0').format(total)}",
-            isBold: true),
-        const Divider(height: 24),
-        _row("Paid", "₹${NumberFormat('#,##0').format(paid)}",
-            color: Colors.green),
-        const SizedBox(height: 8),
-        _row("Pending", "₹${NumberFormat('#,##0').format(total - paid)}",
-            color: Colors.orange),
-      ]),
-    );
-  }
-
-  Widget _row(String label, String val, {bool isBold = false, Color? color}) {
-    return Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-      Text(label, style: GoogleFonts.poppins(color: _textGrey)),
-      Flexible(
-          child: Text(val,
-              style: GoogleFonts.poppins(
-                  fontWeight: isBold ? FontWeight.bold : FontWeight.w600,
-                  fontSize: 15,
-                  color: color ?? Colors.black),
-              overflow: TextOverflow.ellipsis))
-    ]);
-  }
-
-  Widget _buildScheduleCard(String text) {
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.symmetric(horizontal: 16),
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
-      decoration: BoxDecoration(
-          color: Colors.blue[50],
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: Colors.blue.shade100)),
-      child: Row(children: [
-        const Icon(Icons.calendar_month, color: Colors.blue),
-        const SizedBox(width: 16),
-        Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Text("Scheduled Pickup",
-              style:
-                  TextStyle(color: Colors.blue, fontWeight: FontWeight.bold)),
-          Text(text,
-              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16))
-        ]),
+        _row("Total Quantity",
+            "${qty.toString().replaceAll(RegExp(r"([.]*0)(?!.*\d)"), "")} Kg",
+            isNumber: true),
+        const SizedBox(height: 12),
+        _row("Total Price", "₹${NumberFormat('#,##0').format(total)}",
+            isBold: true, isNumber: true),
+        const Padding(
+            padding: EdgeInsets.symmetric(vertical: 16),
+            child: Divider(height: 1)),
+        _row("Advance Paid by Buyer", "₹${NumberFormat('#,##0').format(paid)}",
+            color: _primaryGreen, isNumber: true),
+        const SizedBox(height: 12),
+        _row(
+            "Pending Balance", "₹${NumberFormat('#,##0').format(total - paid)}",
+            color: Colors.red.shade700, isBold: true, isNumber: true),
       ]),
     );
   }
 
   Widget _buildTrackingBlock(String status, bool sharing, double fLat,
-      double fLng, double bLat, double bLng, String schedule) {
+      double fLng, double bLat, double bLng) {
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.symmetric(horizontal: 16),
@@ -373,23 +696,30 @@ class _FarmerOrderDetailScreenState extends State<FarmerOrderDetailScreen> {
       decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(20),
-          boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 5)]),
+          border: Border.all(color: Colors.grey.shade200),
+          boxShadow: [
+            BoxShadow(
+                color: Colors.black.withOpacity(0.03),
+                blurRadius: 15,
+                offset: const Offset(0, 5))
+          ]),
       child: Column(children: [
         Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
           Text("Shipment Status",
               style: GoogleFonts.poppins(
-                  fontWeight: FontWeight.bold, fontSize: 16)),
+                  fontWeight: FontWeight.bold,
+                  fontSize: 16,
+                  color: Colors.black87)),
           if (sharing) _buildLiveBadge(),
         ]),
-        const SizedBox(height: 20),
+        const SizedBox(height: 24),
         _buildCustomTimeline(status),
-        const SizedBox(height: 20),
+        const SizedBox(height: 24),
         GestureDetector(
           onTap: () => Navigator.push(
               context,
               MaterialPageRoute(
-                  builder: (_) =>
-                      FullScreenTracking(orderId: _order!['id'].toString()))),
+                  builder: (_) => FullScreenTracking(orderId: _targetOrderId))),
           child: Container(
             height: 120,
             width: double.infinity,
@@ -404,7 +734,18 @@ class _FarmerOrderDetailScreenState extends State<FarmerOrderDetailScreen> {
                   bottom: 40,
                   child: _MapMarker(
                       label: "Farm", icon: Icons.store, color: Colors.brown)),
-              if (bLat != 0) _buildAnimatedTruck(fLat, fLng, bLat, bLng),
+              if (sharing && bLat != 0.0 && fLat != 0.0)
+                ValueListenableBuilder<double>(
+                    valueListenable: _progressNotifier,
+                    builder: (context, progress, child) {
+                      return AnimatedAlign(
+                          duration: const Duration(seconds: 2),
+                          curve: Curves.easeInOut,
+                          alignment:
+                              Alignment(ui.lerpDouble(-0.8, 0.8, progress)!, 0),
+                          child: const Icon(Icons.local_shipping,
+                              color: Colors.blueAccent, size: 30));
+                    }),
               const Positioned(
                   right: 10,
                   bottom: 10,
@@ -412,252 +753,163 @@ class _FarmerOrderDetailScreenState extends State<FarmerOrderDetailScreen> {
             ]),
           ),
         ),
+        const SizedBox(height: 16),
+        ValueListenableBuilder<double?>(
+          valueListenable: _distanceNotifier,
+          builder: (context, distance, child) {
+            if (!_isSharingNotifier.value || distance == null)
+              return const SizedBox.shrink();
+            double km = distance / 1000;
+            return Padding(
+              padding: const EdgeInsets.only(top: 12),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.radar_rounded,
+                      size: 14, color: Colors.grey.shade500),
+                  const SizedBox(width: 6),
+                  Text("${km.toStringAsFixed(1)} km to Buyer",
+                      style: GoogleFonts.jetBrainsMono(
+                          fontSize: 13,
+                          color: Colors.grey.shade700,
+                          fontWeight: FontWeight.w600)),
+                ],
+              ),
+            );
+          },
+        ),
       ]),
     );
   }
 
-  // ✅ Clean Contact Card Setup (No Call Icon)
-  Widget _buildContactCard(String role, String name, String loc, String status,
-      String crop, String id, Color avatarBg) {
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.symmetric(horizontal: 16),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(20),
-          boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 5)]),
-      child: Row(children: [
-        CircleAvatar(
-            radius: 24,
-            backgroundColor: avatarBg,
-            child: Text(name.isNotEmpty ? name[0].toUpperCase() : role[0])),
-        const SizedBox(width: 16),
-        Expanded(
-            child:
-                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(name, style: const TextStyle(fontWeight: FontWeight.bold)),
-          Text("$role • $loc", style: const TextStyle(color: Colors.grey))
-        ])),
-        IconButton.filled(
-            onPressed: () => Navigator.push(
-                context,
-                MaterialPageRoute(
-                    builder: (_) => ChatScreen(
-                        targetUserId: id,
-                        targetName: name,
-                        orderId: _order!['id'].toString(),
-                        cropName: crop,
-                        orderStatus: status))),
-            style:
-                IconButton.styleFrom(backgroundColor: const Color(0xFF2E7D32)),
-            icon: const Icon(Icons.chat_bubble_outline, color: Colors.white)),
-      ]),
-    );
-  }
-
-  // ✅ BOTTOM PANEL (Flush, Lowered, Full-Width workflow)
-  Widget _buildBottomPanel(String status, double bottomPadding) {
-    List<Widget> buttons = [];
-
-    // Stage 1: Accept or Reject
-    if (status == 'Pending' || status == 'Ordered') {
-      buttons = [
-        SizedBox(
-          width: double.infinity,
-          height: 54,
-          child: ElevatedButton.icon(
-              onPressed: () => _updateStatus('Accepted'),
-              style: ElevatedButton.styleFrom(
-                  backgroundColor: _primaryGreen,
-                  elevation: 4,
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(30))),
-              icon: _isUpdating
-                  ? const SizedBox.shrink()
-                  : const Icon(Icons.thumb_up_alt_outlined,
-                      color: Colors.white, size: 20),
-              label: _isUpdating
-                  ? const SizedBox(
-                      height: 24,
-                      width: 24,
-                      child: CircularProgressIndicator(
-                          color: Colors.white, strokeWidth: 2))
-                  : Text(_text('accept').toUpperCase(),
-                      style: GoogleFonts.poppins(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 16))),
-        ),
-        const SizedBox(height: 12),
-        SizedBox(
-          width: double.infinity,
-          height: 54,
-          child: OutlinedButton(
-              onPressed: () => _updateStatus('Rejected'),
-              style: OutlinedButton.styleFrom(
-                  side: const BorderSide(color: Colors.red),
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(30))),
-              child: Text(_text('reject').toUpperCase(),
-                  style: GoogleFonts.poppins(
-                      color: Colors.red,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 16))),
-        ),
-      ];
-    }
-    // Stage 2: Mark Packed
-    else if (status == 'Accepted') {
-      buttons = [
-        SizedBox(
-          width: double.infinity,
-          height: 54,
-          child: ElevatedButton.icon(
-              onPressed: () => _updateStatus('Packed'),
-              style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.orange,
-                  elevation: 4,
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(30))),
-              icon: _isUpdating
-                  ? const SizedBox.shrink()
-                  : const Icon(Icons.inventory_2_outlined,
-                      color: Colors.white, size: 20),
-              label: _isUpdating
-                  ? const SizedBox(
-                      height: 24,
-                      width: 24,
-                      child: CircularProgressIndicator(
-                          color: Colors.white, strokeWidth: 2))
-                  : Text("MARK AS PACKED",
-                      style: GoogleFonts.poppins(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 16))),
-        ),
-      ];
-    }
-    // Stage 3: Start Shipping
-    else if (status == 'Packed') {
-      buttons = [
-        SizedBox(
-          width: double.infinity,
-          height: 54,
-          child: ElevatedButton.icon(
-              onPressed: () => _updateStatus('Shipped'),
-              style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.blue,
-                  elevation: 4,
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(30))),
-              icon: _isUpdating
-                  ? const SizedBox.shrink()
-                  : const Icon(Icons.local_shipping_outlined,
-                      color: Colors.white, size: 20),
-              label: _isUpdating
-                  ? const SizedBox(
-                      height: 24,
-                      width: 24,
-                      child: CircularProgressIndicator(
-                          color: Colors.white, strokeWidth: 2))
-                  : Text("START SHIPPING",
-                      style: GoogleFonts.poppins(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 16))),
-        ),
-      ];
-    }
-    // Stage 4: Mark Delivered (Direct completion for farmer)
-    else if (status == 'Shipped' || status == 'In Transit') {
-      buttons = [
-        SizedBox(
-          width: double.infinity,
-          height: 54,
-          child: ElevatedButton.icon(
-              onPressed: () => _updateStatus('Completed'),
-              style: ElevatedButton.styleFrom(
-                  backgroundColor: _primaryGreen,
-                  elevation: 4,
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(30))),
-              icon: _isUpdating
-                  ? const SizedBox.shrink()
-                  : const Icon(Icons.done_all, color: Colors.white, size: 20),
-              label: _isUpdating
-                  ? const SizedBox(
-                      height: 24,
-                      width: 24,
-                      child: CircularProgressIndicator(
-                          color: Colors.white, strokeWidth: 2))
-                  : Text("MARK DELIVERED",
-                      style: GoogleFonts.poppins(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 16))),
-        ),
-      ];
-    }
-    // Stage 5: Completed or Rejected
-    else {
-      buttons = [
-        SizedBox(
-          width: double.infinity,
-          height: 54,
-          child: ElevatedButton(
-            onPressed: null,
-            style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.grey.shade300,
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(30))),
-            child: Text("STATUS: ${status.toUpperCase()}",
-                style: GoogleFonts.poppins(
-                    color: Colors.grey.shade600,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 16)),
-          ),
-        ),
-      ];
-    }
-
-    return Positioned(
-      left: 0,
-      right: 0,
-      bottom: 0,
-      child: Container(
-        padding: const EdgeInsets.fromLTRB(20, 16, 20, 12), // ✅ Flush to bottom
-        decoration: const BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-            boxShadow: [
-              BoxShadow(
-                  color: Colors.black12, blurRadius: 20, offset: Offset(0, -5))
-            ]),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: buttons,
-        ),
+  Widget _buildContactCard(
+      String name, String loc, String status, String cropName, String buyerId) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text("Buyer Details",
+              style: GoogleFonts.poppins(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.black87)),
+          const SizedBox(height: 16),
+          Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: Colors.grey.shade200),
+                  boxShadow: [
+                    BoxShadow(
+                        color: Colors.black.withOpacity(0.03),
+                        blurRadius: 15,
+                        offset: const Offset(0, 5))
+                  ]),
+              child: Row(children: [
+                CircleAvatar(
+                    radius: 26,
+                    backgroundColor: Colors.amber.shade100,
+                    child: Text(name.isNotEmpty ? name[0].toUpperCase() : "B",
+                        style: GoogleFonts.poppins(
+                            fontWeight: FontWeight.bold,
+                            color: Colors.amber.shade900,
+                            fontSize: 20))),
+                const SizedBox(width: 16),
+                Expanded(
+                    child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                      Text(name,
+                          style: GoogleFonts.poppins(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 16,
+                              color: Colors.black87)),
+                      const SizedBox(height: 6),
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(Icons.location_on_rounded,
+                              size: 14, color: Colors.grey.shade500),
+                          const SizedBox(width: 6),
+                          Expanded(
+                              child: Text(
+                                  loc.isEmpty ? 'Address not provided' : loc,
+                                  style: GoogleFonts.poppins(
+                                      color: Colors.grey.shade600,
+                                      fontSize: 13),
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis)),
+                        ],
+                      )
+                    ])),
+                IconButton(
+                    onPressed: () {
+                      if (buyerId.isNotEmpty) {
+                        Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                                builder: (_) => ChatScreen(
+                                    targetUserId: buyerId,
+                                    targetName: name,
+                                    orderId: _targetOrderId,
+                                    cropName: cropName,
+                                    orderStatus: status)));
+                      }
+                    },
+                    style: IconButton.styleFrom(
+                        backgroundColor: _primaryGreen,
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12))),
+                    icon: const Icon(Icons.chat_bubble_outline_rounded,
+                        color: Colors.white)),
+              ])),
+        ],
       ),
     );
   }
 
-  // --- Helpers ---
+  Widget _row(String label, String val,
+      {bool isBold = false, Color? color, bool isNumber = false}) {
+    return Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+      Text(label,
+          style:
+              GoogleFonts.poppins(color: Colors.grey.shade600, fontSize: 14)),
+      Text(val,
+          style: isNumber
+              ? GoogleFonts.jetBrainsMono(
+                  fontWeight: isBold ? FontWeight.bold : FontWeight.w600,
+                  fontSize: 15,
+                  color: color ?? Colors.black87)
+              : GoogleFonts.poppins(
+                  fontWeight: isBold ? FontWeight.bold : FontWeight.w600,
+                  fontSize: 15,
+                  color: color ?? Colors.black87))
+    ]);
+  }
+
   Widget _buildStatusBadge(String status) {
-    Color c = (status == 'Accepted' || status == 'Completed')
-        ? Colors.green
-        : (status == 'Rejected'
-            ? Colors.red
-            : (status == 'Shipped' || status == 'In Transit'
-                ? Colors.blue
-                : Colors.orange));
+    String lower = status.toLowerCase();
+    Color color =
+        (['accepted', 'confirmed', 'completed', 'delivered'].contains(lower))
+            ? _primaryGreen
+            : (['rejected', 'cancelled'].contains(lower)
+                ? Colors.red.shade700
+                : const Color(0xFFF57C00));
     return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         decoration: BoxDecoration(
-            color: c.withOpacity(0.1), borderRadius: BorderRadius.circular(20)),
-        child: Text(status,
+            color: color.withOpacity(0.1),
+            borderRadius: BorderRadius.circular(100)),
+        child: Text(status.toUpperCase(),
             style: GoogleFonts.poppins(
-                color: c, fontSize: 12, fontWeight: FontWeight.bold)));
+                color: color,
+                fontSize: 10,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 0.5)));
   }
 
   Widget _buildLiveBadge() => Container(
@@ -668,49 +920,140 @@ class _FarmerOrderDetailScreenState extends State<FarmerOrderDetailScreen> {
           style: GoogleFonts.poppins(
               color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)));
 
-  Widget _buildCustomTimeline(String s) {
-    int step = (s == 'Packed')
-        ? 1
-        : (['Shipped', 'In Transit'].contains(s)
-            ? 2
-            : (['Delivered', 'Completed'].contains(s) ? 3 : 0));
-    return Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-      _step("Confirmed", 0, step),
-      _line(0, step),
-      _step("Packed", 1, step),
-      _line(1, step),
-      _step("Shipped", 2, step),
-      _line(2, step),
-      _step("Delivered", 3, step)
+  Widget _buildCustomTimeline(String currentStatus) {
+    String lower = currentStatus.toLowerCase();
+    int currentStep = (['accepted', 'confirmed'].contains(lower))
+        ? 0
+        : (lower == 'packed')
+            ? 1
+            : (['shipped', 'in transit', 'out for delivery'].contains(lower))
+                ? 2
+                : (['delivered', 'completed'].contains(lower))
+                    ? 3
+                    : 0;
+
+    return Row(children: [
+      _step("Confirmed", 0, currentStep),
+      _line(0, currentStep),
+      _step("Packed", 1, currentStep),
+      _line(1, currentStep),
+      _step("Shipped", 2, currentStep),
+      _line(2, currentStep),
+      _step("Delivered", 3, currentStep)
     ]);
   }
 
-  Widget _step(String l, int i, int c) => Column(children: [
-        Icon(Icons.check_circle,
-            color: i <= c ? Colors.green : Colors.grey.shade300, size: 24),
-        const SizedBox(height: 4),
-        Text(l,
-            style: GoogleFonts.poppins(
-                fontSize: 10, color: i <= c ? Colors.black : Colors.grey))
-      ]);
-  Widget _line(int i, int c) => Expanded(
-      child: Container(
-          height: 2,
-          color: i < c ? Colors.green : Colors.grey.shade300,
-          margin: const EdgeInsets.only(bottom: 20)));
+  Widget _step(String label, int idx, int curr) {
+    bool done = idx <= curr;
+    return Column(children: [
+      Container(
+          padding: const EdgeInsets.all(2),
+          decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: done ? _primaryGreen : Colors.grey.shade200),
+          child:
+              Icon(Icons.check_circle_rounded, color: Colors.white, size: 20)),
+      const SizedBox(height: 8),
+      Text(label,
+          style: GoogleFonts.poppins(
+              fontSize: 10,
+              fontWeight: done ? FontWeight.bold : FontWeight.w500,
+              color: done ? Colors.black87 : Colors.grey.shade500))
+    ]);
+  }
 
-  Widget _buildAnimatedTruck(
-      double fLat, double fLng, double bLat, double bLng) {
-    double dist = Geolocator.distanceBetween(fLat, fLng, bLat, bLng);
-    double prog = (1.0 - (dist / 10000)).clamp(0.0, 1.0);
-    return AnimatedAlign(
-        duration: const Duration(seconds: 2),
-        alignment: Alignment(ui.lerpDouble(-0.8, 0.8, prog)!, 0),
-        child: const Icon(Icons.local_shipping,
-            color: Colors.blueAccent, size: 30));
+  Widget _line(int idx, int curr) {
+    return Expanded(
+        child: Container(
+            height: 2,
+            color: idx < curr ? _primaryGreen : Colors.grey.shade200,
+            margin: const EdgeInsets.only(bottom: 24)));
   }
 }
 
+// ============================================================================
+// ✅ THE SKELETON LOADER
+// ============================================================================
+class _OrderDetailsSkeleton extends StatelessWidget {
+  const _OrderDetailsSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(0, 16, 0, 16),
+      child: Column(
+        children: [
+          Container(
+            width: double.infinity,
+            margin: const EdgeInsets.symmetric(horizontal: 16),
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: Colors.grey.shade200)),
+            child: Row(children: [
+              Container(
+                  height: 100,
+                  width: 100,
+                  decoration: BoxDecoration(
+                      color: Colors.grey.shade100,
+                      borderRadius: BorderRadius.circular(16))),
+              const SizedBox(width: 20),
+              Expanded(
+                  child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                    Container(
+                        height: 20, width: 150, color: Colors.grey.shade100),
+                    const SizedBox(height: 8),
+                    Container(
+                        height: 14, width: 100, color: Colors.grey.shade100),
+                    const SizedBox(height: 8),
+                    Container(
+                        height: 14, width: 120, color: Colors.grey.shade100),
+                    const SizedBox(height: 16),
+                    Container(
+                        height: 20, width: 80, color: Colors.grey.shade100),
+                  ]))
+            ]),
+          ),
+          const SizedBox(height: 16),
+          Container(
+            width: double.infinity,
+            margin: const EdgeInsets.symmetric(horizontal: 16),
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: Colors.grey.shade200)),
+            child: Column(children: [
+              Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                Container(height: 14, width: 100, color: Colors.grey.shade100),
+                Container(height: 14, width: 50, color: Colors.grey.shade100)
+              ]),
+              const SizedBox(height: 16),
+              Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                Container(height: 16, width: 120, color: Colors.grey.shade100),
+                Container(height: 16, width: 80, color: Colors.grey.shade100)
+              ]),
+              const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 16),
+                  child: Divider(height: 1)),
+              Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                Container(height: 14, width: 100, color: Colors.grey.shade100),
+                Container(height: 14, width: 60, color: Colors.grey.shade100)
+              ]),
+            ]),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ============================================================================
+// ✅ MAP HELPER CLASSES
+// ============================================================================
 class _MapMarker extends StatelessWidget {
   final String label;
   final IconData icon;
@@ -745,4 +1088,120 @@ class _RoutePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(old) => false;
+}
+
+// ============================================================================
+// ✅ THE INLINE CROP VIEWER
+// ============================================================================
+class _CropDetailScreen extends StatelessWidget {
+  final Map<String, dynamic> crop;
+  final String? imgUrl;
+  final String heroTag;
+
+  const _CropDetailScreen(
+      {required this.crop, required this.imgUrl, required this.heroTag});
+
+  @override
+  Widget build(BuildContext context) {
+    final String cropName = crop['crop_name'] ?? "Crop Details";
+    final String variety = crop['variety'] ?? "Standard";
+    final String grade = crop['grade'] ?? "Standard";
+    final String desc =
+        crop['description'] ?? "No additional description provided.";
+
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: CustomScrollView(
+        physics: const BouncingScrollPhysics(),
+        slivers: [
+          SliverAppBar(
+            expandedHeight: MediaQuery.of(context).size.height * 0.55,
+            pinned: true,
+            backgroundColor: Colors.black,
+            iconTheme: const IconThemeData(color: Colors.white),
+            flexibleSpace: FlexibleSpaceBar(
+              background: Hero(
+                tag: heroTag,
+                child: (imgUrl != null && imgUrl!.isNotEmpty)
+                    ? CachedNetworkImage(
+                        imageUrl: imgUrl!.startsWith('http')
+                            ? imgUrl!
+                            : Supabase.instance.client.storage
+                                .from('crop_images')
+                                .getPublicUrl(imgUrl!),
+                        fit: BoxFit.cover,
+                        placeholder: (context, url) =>
+                            Container(color: Colors.grey.shade900),
+                        errorWidget: (context, url, error) =>
+                            const Icon(Icons.broken_image, color: Colors.grey),
+                      )
+                    : Container(color: Colors.grey.shade900),
+              ),
+            ),
+          ),
+          SliverToBoxAdapter(
+            child: Container(
+              padding: const EdgeInsets.all(24),
+              decoration: const BoxDecoration(
+                  color: Colors.white,
+                  borderRadius:
+                      BorderRadius.vertical(top: Radius.circular(24))),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(cropName,
+                      style: GoogleFonts.poppins(
+                          fontSize: 28,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.black87)),
+                  const SizedBox(height: 16),
+                  Row(
+                    children: [
+                      Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 6),
+                          decoration: BoxDecoration(
+                              color: const Color(0xFF1B5E20).withOpacity(0.1),
+                              borderRadius: BorderRadius.circular(8)),
+                          child: Text("Variety: $variety",
+                              style: GoogleFonts.poppins(
+                                  color: const Color(0xFF1B5E20),
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 13))),
+                      const SizedBox(width: 12),
+                      Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 6),
+                          decoration: BoxDecoration(
+                              color: Colors.grey.shade100,
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(color: Colors.grey.shade300)),
+                          child: Text("Grade: $grade",
+                              style: GoogleFonts.poppins(
+                                  color: Colors.grey.shade800,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 13))),
+                    ],
+                  ),
+                  const SizedBox(height: 32),
+                  Text("Description",
+                      style: GoogleFonts.poppins(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.black87)),
+                  const SizedBox(height: 12),
+                  Text(desc,
+                      style: GoogleFonts.poppins(
+                          fontSize: 15,
+                          color: Colors.grey.shade700,
+                          height: 1.6)),
+                  const SizedBox(height: 200),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }

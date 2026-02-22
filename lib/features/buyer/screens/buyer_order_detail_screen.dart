@@ -1,11 +1,12 @@
 import 'dart:async';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:intl/intl.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:url_launcher/url_launcher.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 
 // ✅ Logic Imports
 import 'package:agriyukt_app/features/common/screens/chat_screen.dart';
@@ -24,62 +25,115 @@ class BuyerOrderDetailScreen extends StatefulWidget {
 }
 
 class _BuyerOrderDetailScreenState extends State<BuyerOrderDetailScreen>
-    with SingleTickerProviderStateMixin {
+    with WidgetsBindingObserver {
   final _supabase = Supabase.instance.client;
   final PaymentService _paymentService = PaymentService();
 
   bool _isLoading = true;
+  bool _isUpdatingStatus = false;
+  late final RealtimeChannel _orderChannel;
+
   Map<String, dynamic>? _order;
 
-  // GPS State
   StreamSubscription<Position>? _positionStream;
-  bool _isSharing = false;
-  double _progress = 0.0;
+  bool _hasStartedTripInSession = false;
+  final ValueNotifier<bool> _isSharingNotifier = ValueNotifier<bool>(false);
+  final ValueNotifier<double?> _distanceNotifier = ValueNotifier<double?>(null);
+  final ValueNotifier<double> _progressNotifier = ValueNotifier<double>(0.0);
 
-  // ✅ Payment Input Controller
   final TextEditingController _amountController = TextEditingController();
 
-  // Theme Colors
-  final Color _primaryGreen = const Color(0xFF2E7D32);
-  final Color _bgGrey = const Color(0xFFF4F7F6);
+  static const Color _primaryBlue = Color(0xFF1565C0);
+  static const Color _primaryGreen = Color(0xFF2E7D32);
+  static const Color _surfaceBg = Color(0xFFF4F6F8);
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _fetchOrderDetails();
+    _setupRealtimeSubscription();
   }
 
   @override
   void dispose() {
-    _stopSharingLocation();
+    WidgetsBinding.instance.removeObserver(this);
+
+    _positionStream?.cancel();
+    _positionStream = null;
+
+    if (_isSharingNotifier.value && widget.orderId.isNotEmpty) {
+      Future.microtask(() async {
+        try {
+          await _supabase.from('orders').update({
+            'is_sharing_location': false,
+            'is_trip_started': false
+          }).eq('id', widget.orderId);
+        } catch (_) {}
+      });
+    }
+
+    _supabase.removeChannel(_orderChannel);
     _paymentService.dispose();
     _amountController.dispose();
+    _isSharingNotifier.dispose();
+    _distanceNotifier.dispose();
+    _progressNotifier.dispose();
     super.dispose();
   }
 
-  // ---------------------------------------------------------------------------
-  // 📦 DATA FETCHING
-  // ---------------------------------------------------------------------------
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      if (mounted) _fetchOrderDetails();
+    }
+  }
 
+  void _showSnack(String msg, Color color) {
+    if (!mounted) return;
+    HapticFeedback.mediumImpact();
+    ScaffoldMessenger.of(context).clearSnackBars();
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content:
+          Text(msg, style: GoogleFonts.poppins(fontWeight: FontWeight.w600)),
+      backgroundColor: color,
+      behavior: SnackBarBehavior.floating,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+    ));
+  }
+
+  // ---------------------------------------------------------------------------
+  // 📦 DATA FETCHING ENGINE
+  // ---------------------------------------------------------------------------
   Future<void> _fetchOrderDetails() async {
     try {
       final data = await _supabase.from('orders').select('''
               *,
-              farmer:profiles!farmer_id(first_name, last_name, phone, district, state, latitude, longitude),
-              crop:crops!crop_id(image_url, crop_name, unit, variety, grade, harvest_date)
+              farmer:profiles!orders_farmer_id_fkey(id, first_name, last_name, district, state, latitude, longitude),
+              crop:crops!orders_crop_id_fkey(id, image_url, crop_name, unit, variety, grade, harvest_date, price, description)
           ''').eq('id', widget.orderId).single();
 
       if (mounted) {
         setState(() {
           _order = data;
           _isLoading = false;
-          _isSharing = data['is_sharing_location'] ?? false;
-
-          String status = data['status'] ?? 'Pending';
-          if (_isSharing && status != 'Completed' && status != 'Delivered') {
-            _startSharingLocation();
-          }
         });
+
+        if (!mounted) return;
+        _isSharingNotifier.value =
+            data['is_sharing_location'] ?? data['is_trip_started'] ?? false;
+
+        _updateDistanceLocally();
+
+        String status = (data['tracking_status'] ?? data['status'] ?? '')
+            .toString()
+            .toLowerCase();
+        if (_isSharingNotifier.value &&
+            ['shipped', 'in transit', 'out for delivery'].contains(status)) {
+          if (_positionStream == null) {
+            _startSharingLocation(isAutoResume: true);
+          }
+        }
       }
     } catch (e) {
       debugPrint("Fetch Error: $e");
@@ -87,14 +141,43 @@ class _BuyerOrderDetailScreenState extends State<BuyerOrderDetailScreen>
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // 🛰️ GPS LOGIC
-  // ---------------------------------------------------------------------------
+  void _setupRealtimeSubscription() {
+    _orderChannel = _supabase
+        .channel('public:orders:${widget.orderId}')
+        .onPostgresChanges(
+          event: PostgresChangeEvent.update,
+          schema: 'public',
+          table: 'orders',
+          filter: PostgresChangeFilter(
+            type: PostgresChangeFilterType.eq,
+            column: 'id',
+            value: widget.orderId,
+          ),
+          callback: (payload) {
+            final newRec = payload.newRecord ?? {};
+            final oldRec = payload.oldRecord ?? {};
 
-  Future<void> _startSharingLocation() async {
+            if (newRec['status'] != oldRec['status'] ||
+                newRec['tracking_status'] != oldRec['tracking_status'] ||
+                newRec['advance_amount'] != oldRec['advance_amount']) {
+              if (mounted) _fetchOrderDetails();
+            }
+          },
+        )
+        .subscribe();
+  }
+
+  // ---------------------------------------------------------------------------
+  // 🚀 START TRIP & GPS ENGINE
+  // ---------------------------------------------------------------------------
+  Future<void> _startSharingLocation({bool isAutoResume = false}) async {
+    if (_positionStream != null) return;
+
     bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
     if (!serviceEnabled) {
-      if (mounted) _showSnack("Please enable GPS services.", Colors.red);
+      if (mounted)
+        _showSnack(
+            "Please enable GPS services in your device.", Colors.red.shade700);
       return;
     }
 
@@ -104,15 +187,67 @@ class _BuyerOrderDetailScreenState extends State<BuyerOrderDetailScreen>
       if (permission == LocationPermission.denied) return;
     }
 
-    if (permission == LocationPermission.deniedForever) return;
+    if (permission == LocationPermission.deniedForever) {
+      if (mounted)
+        _showSnack(
+            "Location permissions are permanently denied. Please allow from settings.",
+            Colors.red.shade700);
+      return;
+    }
 
-    setState(() => _isSharing = true);
+    if (mounted) _isSharingNotifier.value = true;
+
+    if (!isAutoResume && !_hasStartedTripInSession) {
+      _hasStartedTripInSession = true;
+      HapticFeedback.lightImpact();
+
+      try {
+        await _supabase.from('orders').update({
+          'is_sharing_location': true,
+          'is_trip_started': true,
+          'status': 'in transit',
+          'tracking_status': 'In Transit'
+        }).eq('id', widget.orderId);
+
+        // ✅ NOTIFY FARMER: Trip Started
+        try {
+          final currentUser = _supabase.auth.currentUser;
+          if (currentUser != null && _order?['farmer_id'] != null) {
+            final buyerPrefs = await _supabase
+                .from('profiles')
+                .select('first_name')
+                .eq('id', currentUser.id)
+                .maybeSingle();
+            final buyerName = buyerPrefs?['first_name'] ?? 'Buyer';
+            await _supabase.from('notifications').insert({
+              'user_id': _order!['farmer_id'],
+              'type': 'order_update',
+              'title': 'Trip Started',
+              'body': '$buyerName has started the trip to your location.',
+              'metadata': {
+                'order_id': widget.orderId,
+                'status': 'in transit',
+                'person_name': buyerName,
+              }
+            });
+          }
+        } catch (_) {}
+
+        if (mounted)
+          _showSnack(
+              "🚗 Trip Started! Farmer Notified.", Colors.green.shade700);
+        if (mounted) _fetchOrderDetails();
+      } catch (e) {
+        debugPrint("Location update failed: $e");
+      }
+    }
 
     try {
       Position initialPos = await Geolocator.getCurrentPosition(
           desiredAccuracy: LocationAccuracy.high);
+      if (!mounted) return;
       _updateDatabase(initialPos);
-      _updateLocalProgress(initialPos);
+      _calculateLiveDistance(initialPos);
     } catch (e) {
       debugPrint("GPS Error: $e");
     }
@@ -121,96 +256,132 @@ class _BuyerOrderDetailScreenState extends State<BuyerOrderDetailScreen>
       locationSettings: const LocationSettings(
           accuracy: LocationAccuracy.bestForNavigation, distanceFilter: 10),
     ).listen((Position position) {
+      if (!mounted) return;
       _updateDatabase(position);
-      _updateLocalProgress(position);
+      _calculateLiveDistance(position);
+    }, onError: (e) {
+      debugPrint("GPS Stream Error: $e");
+      if (mounted) _stopSharingLocation();
     });
-
-    _showSnack("🔴 Live Sharing Active", Colors.green);
   }
 
   Future<void> _stopSharingLocation() async {
     await _positionStream?.cancel();
     _positionStream = null;
-    if (mounted) setState(() => _isSharing = false);
-    if (widget.orderId.isNotEmpty) {
-      await _supabase
-          .from('orders')
-          .update({'is_sharing_location': false}).eq('id', widget.orderId);
+
+    if (mounted) {
+      _isSharingNotifier.value = false;
+      _hasStartedTripInSession = false;
     }
+
+    if (widget.orderId.isNotEmpty) {
+      Future.microtask(() async {
+        try {
+          await _supabase.from('orders').update({
+            'is_sharing_location': false,
+            'is_trip_started': false
+          }).eq('id', widget.orderId);
+        } catch (_) {}
+      });
+    }
+
+    if (mounted) _showSnack("🛑 Trip Ended.", Colors.orange.shade800);
   }
 
   Future<void> _updateDatabase(Position pos) async {
-    await _supabase.from('orders').update({
-      'is_sharing_location': true,
-      'buyer_lat': pos.latitude,
-      'buyer_lng': pos.longitude,
-    }).eq('id', widget.orderId);
+    try {
+      await _supabase.from('orders').update({
+        'buyer_lat': pos.latitude,
+        'buyer_lng': pos.longitude,
+      }).eq('id', widget.orderId);
+    } catch (e) {
+      debugPrint("GPS Sync Ignored (Likely offline): $e");
+    }
   }
 
-  void _updateLocalProgress(Position pos) {
-    if (_order == null || _order!['farmer'] == null) return;
-    final farmer = _order!['farmer'];
-    double? farmLat = (farmer['latitude'] as num?)?.toDouble();
-    double? farmLng = (farmer['longitude'] as num?)?.toDouble();
+  void _calculateLiveDistance(Position pos) {
+    if (_order == null || !mounted) return;
+    final farmer = _order!['farmer'] is Map ? _order!['farmer'] : {};
+    double? targetLat = (_order!['transport_lat'] as num?)?.toDouble() ??
+        (farmer['latitude'] as num?)?.toDouble();
+    double? targetLng = (_order!['transport_lng'] as num?)?.toDouble() ??
+        (farmer['longitude'] as num?)?.toDouble();
 
-    if (farmLat == null || farmLng == null) return;
+    if (targetLat == null || targetLng == null) return;
 
     double distMeters = Geolocator.distanceBetween(
-        pos.latitude, pos.longitude, farmLat, farmLng);
-    setState(() {
-      _progress = (1.0 - (distMeters / 10000)).clamp(0.0, 1.0);
-    });
+        pos.latitude, pos.longitude, targetLat, targetLng);
+    _distanceNotifier.value = distMeters;
+    _progressNotifier.value = (1.0 - (distMeters / 10000)).clamp(0.0, 1.0);
+  }
+
+  void _updateDistanceLocally() {
+    if (_order == null || !mounted) return;
+    final farmer = _order!['farmer'] is Map ? _order!['farmer'] : {};
+    double? fLat = (_order!['transport_lat'] as num?)?.toDouble() ??
+        (farmer['latitude'] as num?)?.toDouble();
+    double? fLng = (_order!['transport_lng'] as num?)?.toDouble() ??
+        (farmer['longitude'] as num?)?.toDouble();
+    double? bLat = (_order!['buyer_lat'] as num?)?.toDouble();
+    double? bLng = (_order!['buyer_lng'] as num?)?.toDouble();
+
+    if (fLat != null && fLng != null && bLat != null && bLng != null) {
+      double distMeters = Geolocator.distanceBetween(bLat, bLng, fLat, fLng);
+      _distanceNotifier.value = distMeters;
+      _progressNotifier.value = (1.0 - (distMeters / 10000)).clamp(0.0, 1.0);
+    }
   }
 
   // ---------------------------------------------------------------------------
-  // 💰 PAYMENT LOGIC (35% Minimum Check)
+  // 💰 PAYMENT LOGIC
   // ---------------------------------------------------------------------------
-
   void _triggerPayment(double totalAmount, double paidAmount) {
     double outstanding = totalAmount - paidAmount;
-    // Calculate 35% Minimum
-    double minPayment = totalAmount * 0.35;
+    if (outstanding <= 0) return;
 
-    // If they haven't paid the advance yet, suggest min 35%. Else outstanding.
-    double suggestedAmount =
-        (paidAmount < minPayment) ? minPayment : outstanding;
+    double minPayment = totalAmount * 0.50;
+    if (minPayment > outstanding) minPayment = outstanding;
 
-    _amountController.text = suggestedAmount.toStringAsFixed(0);
+    double suggestedAmount = outstanding;
+    _amountController.text = suggestedAmount == suggestedAmount.roundToDouble()
+        ? suggestedAmount.toStringAsFixed(0)
+        : suggestedAmount.toStringAsFixed(2);
 
-    _showCustomPaymentDialog(totalAmount, outstanding, minPayment, paidAmount);
+    _showCustomPaymentDialog(totalAmount, outstanding, paidAmount, minPayment);
   }
 
   void _showCustomPaymentDialog(double totalOrderValue,
-      double outstandingBalance, double minPayment, double currentPaid) {
+      double outstandingBalance, double currentPaid, double minPayment) {
     showDialog(
       context: context,
+      barrierDismissible: false,
       builder: (ctx) {
         return StatefulBuilder(
-          builder: (context, setDialogState) {
+          builder: (BuildContext stateContext, StateSetter setDialogState) {
             double inputAmount = double.tryParse(_amountController.text) ?? 0;
-            double commission = inputAmount * 0.02; // 2%
+            double commission = inputAmount * 0.04;
             double totalPayable = inputAmount + commission;
 
-            // ✅ VALIDATION LOGIC:
-            // 1. Must be > 0
-            // 2. Cannot exceed outstanding balance (+1 buffer)
-            // 3. If paying advance (currentPaid == 0), must be >= 35% total
-            bool isMinMet =
-                (currentPaid > 0) || (inputAmount >= minPayment - 1.0);
-            bool isMaxMet = inputAmount <= (outstandingBalance + 1.0);
+            bool isMinMet = inputAmount >= (minPayment - 0.01);
+            bool isMaxMet = inputAmount <= (outstandingBalance + 0.01);
 
             String? errorText;
-            if (!isMinMet)
-              errorText = "Min Advance: ₹${minPayment.toInt()} (35%)";
-            if (!isMaxMet)
-              errorText = "Max Payment: ₹${outstandingBalance.toInt()}";
+            if (inputAmount <= 0 && _amountController.text.isNotEmpty) {
+              errorText = "Enter a valid amount";
+            } else if (!isMinMet) {
+              errorText = "Min payment: ₹${minPayment.toInt()} (50% of total)";
+            } else if (!isMaxMet) {
+              errorText = "Max payment: ₹${outstandingBalance.toInt()}";
+            }
 
             return AlertDialog(
+              backgroundColor: Colors.white,
+              surfaceTintColor: Colors.transparent,
               shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(16)),
-              title: Text(
-                  currentPaid == 0 ? "Pay Advance (Min 35%)" : "Pay Balance",
-                  style: GoogleFonts.poppins(fontWeight: FontWeight.bold)),
+                  borderRadius: BorderRadius.circular(20)),
+              title: Text("Pay Balance",
+                  style: GoogleFonts.poppins(
+                      fontWeight: FontWeight.bold, fontSize: 18)),
               content: SingleChildScrollView(
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
@@ -218,44 +389,61 @@ class _BuyerOrderDetailScreenState extends State<BuyerOrderDetailScreen>
                   children: [
                     Text("Total Order: ₹${totalOrderValue.toStringAsFixed(0)}",
                         style: GoogleFonts.poppins(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
+                            fontSize: 13,
+                            fontWeight: FontWeight.bold,
                             color: Colors.black87)),
                     Text("Remaining: ₹${outstandingBalance.toStringAsFixed(0)}",
                         style: GoogleFonts.poppins(
-                            fontSize: 12, color: Colors.grey)),
-                    const SizedBox(height: 15),
-
-                    // INPUT FIELD
+                            fontSize: 13, color: Colors.grey.shade600)),
+                    const SizedBox(height: 20),
                     TextField(
                       controller: _amountController,
-                      keyboardType: TextInputType.number,
-                      style: GoogleFonts.poppins(fontWeight: FontWeight.bold),
+                      enabled: true,
+                      keyboardType:
+                          const TextInputType.numberWithOptions(decimal: true),
+                      inputFormatters: [
+                        FilteringTextInputFormatter.allow(
+                            RegExp(r'^\d+\.?\d{0,2}')),
+                      ],
+                      style: GoogleFonts.jetBrainsMono(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 20,
+                          color: Colors.black87),
                       decoration: InputDecoration(
                         prefixText: "₹ ",
+                        prefixStyle: GoogleFonts.poppins(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 20,
+                            color: _primaryBlue),
                         labelText: "Amount to Pay",
+                        labelStyle: GoogleFonts.poppins(fontSize: 14),
                         border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(10)),
-                        errorText: errorText, // Shows min/max error
+                            borderRadius: BorderRadius.circular(12)),
+                        focusedBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: const BorderSide(
+                                color: Color(0xFF1565C0), width: 2)),
+                        errorText: errorText,
                       ),
                       onChanged: (val) => setDialogState(() {}),
                     ),
-
-                    const SizedBox(height: 15),
-                    // BREAKDOWN CARD
+                    const SizedBox(height: 20),
                     Container(
-                      padding: const EdgeInsets.all(12),
+                      padding: const EdgeInsets.all(16),
                       decoration: BoxDecoration(
-                          color: Colors.grey[100],
-                          borderRadius: BorderRadius.circular(8)),
+                          color: Colors.grey.shade50,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: Colors.grey.shade200)),
                       child: Column(
                         children: [
                           _buildBillRow("Base Amount", inputAmount),
-                          const SizedBox(height: 5),
-                          _buildBillRow("Platform Fee (2%)", commission,
-                              color: Colors.red),
-                          const Divider(),
-                          _buildBillRow("Total Charge", totalPayable,
+                          const SizedBox(height: 8),
+                          _buildBillRow("Platform Fee (4%)", commission,
+                              color: Colors.red.shade700),
+                          const Padding(
+                              padding: EdgeInsets.symmetric(vertical: 8),
+                              child: Divider(height: 1)),
+                          _buildBillRow("Total Amount", totalPayable,
                               isBold: true, fontSize: 16),
                         ],
                       ),
@@ -263,22 +451,34 @@ class _BuyerOrderDetailScreenState extends State<BuyerOrderDetailScreen>
                   ],
                 ),
               ),
+              actionsPadding: const EdgeInsets.only(right: 16, bottom: 16),
               actions: [
                 TextButton(
-                  onPressed: () => Navigator.pop(context),
-                  child: const Text("Cancel"),
+                  onPressed: () => Navigator.pop(ctx),
+                  child: Text("Cancel",
+                      style: GoogleFonts.poppins(
+                          color: Colors.grey.shade700,
+                          fontWeight: FontWeight.bold)),
                 ),
                 ElevatedButton(
-                  style:
-                      ElevatedButton.styleFrom(backgroundColor: _primaryGreen),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _primaryBlue,
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12)),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 20, vertical: 12),
+                  ),
                   onPressed: (isMinMet && isMaxMet && inputAmount > 0)
                       ? () {
-                          Navigator.pop(context);
+                          FocusManager.instance.primaryFocus?.unfocus();
+                          Navigator.pop(ctx);
                           _processActualPayment(inputAmount, totalPayable);
                         }
                       : null,
                   child: Text("Pay ₹${totalPayable.toStringAsFixed(0)}",
-                      style: const TextStyle(color: Colors.white)),
+                      style: GoogleFonts.poppins(
+                          color: Colors.white, fontWeight: FontWeight.bold)),
                 ),
               ],
             );
@@ -289,57 +489,168 @@ class _BuyerOrderDetailScreenState extends State<BuyerOrderDetailScreen>
   }
 
   Widget _buildBillRow(String label, double amount,
-      {bool isBold = false, Color? color, double fontSize = 14}) {
+      {bool isBold = false, Color? color, double fontSize = 13}) {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
         Text(label,
-            style: TextStyle(
+            style: GoogleFonts.poppins(
                 fontSize: fontSize,
                 fontWeight: isBold ? FontWeight.bold : FontWeight.w500,
                 color: Colors.black87)),
         Text("₹${amount.toStringAsFixed(2)}",
-            style: TextStyle(
+            style: GoogleFonts.jetBrainsMono(
                 fontSize: fontSize,
-                fontWeight: isBold ? FontWeight.bold : FontWeight.w500,
-                color: color ??
-                    (isBold ? const Color(0xFF1565C0) : Colors.black))),
+                fontWeight: isBold ? FontWeight.bold : FontWeight.w600,
+                color: color ?? (isBold ? _primaryBlue : Colors.black87))),
       ],
     );
   }
 
-  void _processActualPayment(double principalAmount, double totalCharged) {
-    // Current paid amount from DB
-    double currentPaid = (_order!['advance_amount'] ?? 0).toDouble();
-    double newTotalPaid = currentPaid + principalAmount;
+  Future<bool> _processActualPayment(
+      double principalAmount, double totalCharged) async {
+    final currentUser = _supabase.auth.currentUser;
+    if (currentUser == null) {
+      _showSnack("Session expired. Please log in again.", Colors.red.shade700);
+      return false;
+    }
 
-    _paymentService.processPayment(
+    if (mounted) setState(() => _isUpdatingStatus = true);
+
+    Completer<bool> paymentCompleter = Completer<bool>();
+
+    await _paymentService.processPayment(
       context: context,
       appOrderId: widget.orderId,
-      farmerId: _order!['farmer_id'],
+      farmerId: _order?['farmer_id'] ?? '',
       amount: totalCharged,
-      onResult: (success) async {
-        if (success) {
-          // Update DB
+      onResult: (bool isSuccess) async {
+        if (!isSuccess) {
+          if (mounted) setState(() => _isUpdatingStatus = false);
+          paymentCompleter.complete(false);
+          return;
+        }
+        try {
+          final double platformFee = totalCharged - principalAmount;
+
+          await _supabase.from('payments').insert({
+            'order_id': widget.orderId,
+            'buyer_id': currentUser.id,
+            'farmer_id': _order?['farmer_id'],
+            'base_amount': principalAmount,
+            'platform_fee': platformFee,
+            'total_charged': totalCharged,
+            'status': 'SUCCESS',
+            'payment_type': 'ONLINE',
+            'gateway_transaction_id':
+                'txn_${DateTime.now().millisecondsSinceEpoch}',
+          });
+
+          // ✅ INSTANT UI UPDATE: Fetch latest order and manually update advance_amount
+          final latestOrder = await _supabase
+              .from('orders')
+              .select('advance_amount')
+              .eq('id', widget.orderId)
+              .single();
+          double currentPaid =
+              (num.tryParse(latestOrder['advance_amount']?.toString() ?? '0') ??
+                      0)
+                  .toDouble();
+          double newTotalPaid =
+              double.parse((currentPaid + principalAmount).toStringAsFixed(2));
+
           await _supabase.from('orders').update(
               {'advance_amount': newTotalPaid}).eq('id', widget.orderId);
 
-          // Update local UI
-          setState(() {
-            if (_order != null) _order!['advance_amount'] = newTotalPaid;
-          });
+          // ✅ NOTIFY FARMER: Send Payment Received Notification
+          try {
+            if (_order?['farmer_id'] != null) {
+              final buyerPrefs = await _supabase
+                  .from('profiles')
+                  .select('first_name')
+                  .eq('id', currentUser.id)
+                  .maybeSingle();
+              final buyerName = buyerPrefs?['first_name'] ?? 'Buyer';
 
-          _fetchOrderDetails();
-          _showSnack("Payment Successful! Farmer Notified 🔔", Colors.green);
+              await _supabase.from('notifications').insert({
+                'user_id': _order!['farmer_id'],
+                'type': 'payment',
+                'title': 'Payment Received',
+                'body': 'Received ₹$principalAmount from $buyerName.',
+                'metadata': {
+                  'order_id': widget.orderId,
+                  'amount': principalAmount,
+                  'buyer_name': buyerName,
+                  'status': 'paid'
+                }
+              });
+            }
+          } catch (e) {
+            debugPrint("Payment Notification Error: $e");
+          }
+
+          if (mounted) {
+            _showSnack("Payment Successful! 🎉", Colors.green.shade700);
+            await Future.delayed(const Duration(seconds: 1));
+            await _fetchOrderDetails();
+          }
+          paymentCompleter.complete(true);
+        } catch (e) {
+          debugPrint("Payment Sync Error: $e");
+          paymentCompleter.complete(false);
+        } finally {
+          if (mounted) setState(() => _isUpdatingStatus = false);
         }
       },
     );
+
+    return paymentCompleter.future;
   }
 
-  void _showSnack(String msg, Color color) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(msg), backgroundColor: color));
+  // ---------------------------------------------------------------------------
+  // 🛡️ ACTION LOGIC
+  // ---------------------------------------------------------------------------
+  Future<void> _cancelOrder() async {
+    HapticFeedback.heavyImpact();
+    if (mounted) setState(() => _isUpdatingStatus = true);
+    try {
+      await _supabase
+          .from('orders')
+          .update({'status': 'cancelled'}).eq('id', widget.orderId);
+
+      // ✅ NOTIFY FARMER: Order Cancelled
+      try {
+        final currentUser = _supabase.auth.currentUser;
+        if (currentUser != null && _order?['farmer_id'] != null) {
+          final buyerPrefs = await _supabase
+              .from('profiles')
+              .select('first_name')
+              .eq('id', currentUser.id)
+              .maybeSingle();
+          final buyerName = buyerPrefs?['first_name'] ?? 'Buyer';
+
+          await _supabase.from('notifications').insert({
+            'user_id': _order!['farmer_id'],
+            'type': 'order_update',
+            'title': 'Order Cancelled',
+            'body': '$buyerName has cancelled the order.',
+            'metadata': {
+              'order_id': widget.orderId,
+              'status': 'cancelled',
+              'person_name': buyerName,
+            }
+          });
+        }
+      } catch (_) {}
+
+      await _fetchOrderDetails();
+      if (mounted) _showSnack("Order Cancelled", Colors.red.shade700);
+    } catch (e) {
+      if (mounted)
+        _showSnack("Action failed. Check internet.", Colors.red.shade700);
+    } finally {
+      if (mounted) setState(() => _isUpdatingStatus = false);
+    }
   }
 
   Future<void> _pickSchedule() async {
@@ -347,401 +658,307 @@ class _BuyerOrderDetailScreenState extends State<BuyerOrderDetailScreen>
         context: context,
         initialDate: DateTime.now().add(const Duration(days: 1)),
         firstDate: DateTime.now(),
-        lastDate: DateTime.now().add(const Duration(days: 30)));
+        lastDate: DateTime.now().add(const Duration(days: 30)),
+        builder: (context, child) => Theme(
+            data: ThemeData.light().copyWith(
+                colorScheme:
+                    const ColorScheme.light(primary: Color(0xFF1565C0))),
+            child: child!));
     if (date == null || !mounted) return;
 
     final time = await showTimePicker(
-        context: context, initialTime: const TimeOfDay(hour: 10, minute: 0));
-    if (time == null) return;
+        context: context,
+        initialTime: const TimeOfDay(hour: 10, minute: 0),
+        builder: (context, child) => Theme(
+            data: ThemeData.light().copyWith(
+                colorScheme:
+                    const ColorScheme.light(primary: Color(0xFF1565C0))),
+            child: child!));
+    if (time == null || !mounted) return;
 
     final fullDate =
         DateTime(date.year, date.month, date.day, time.hour, time.minute);
 
-    await _supabase
-        .from('orders')
-        .update({'scheduled_pickup_time': fullDate.toIso8601String()}).eq(
-            'id', widget.orderId);
-    _fetchOrderDetails();
-    _showSnack("Schedule Updated", Colors.green);
-  }
-
-  Future<void> _contactUser(String? phone) async {
-    if (phone == null) return;
-    final Uri url = Uri(scheme: 'tel', path: phone);
-    if (await canLaunchUrl(url)) await launchUrl(url);
-  }
-
-  Future<void> _cancelOrder() async {
-    await _supabase
-        .from('orders')
-        .update({'status': 'Cancelled'}).eq('id', widget.orderId);
-    _showSnack("Order Cancelled", Colors.red);
-    _fetchOrderDetails();
-  }
-
-  Future<void> _confirmReceipt() async {
-    await _supabase
-        .from('orders')
-        .update({'status': 'Completed'}).eq('id', widget.orderId);
-    _showSnack("Order Completed", Colors.green);
-    _fetchOrderDetails();
+    setState(() => _isUpdatingStatus = true);
+    try {
+      await _supabase
+          .from('orders')
+          .update({'scheduled_pickup_time': fullDate.toIso8601String()}).eq(
+              'id', widget.orderId);
+      await _fetchOrderDetails();
+      if (mounted) _showSnack("Schedule Updated", Colors.green.shade700);
+    } catch (e) {
+      if (mounted)
+        _showSnack("Action failed. Check internet.", Colors.red.shade700);
+    } finally {
+      if (mounted) setState(() => _isUpdatingStatus = false);
+    }
   }
 
   // ---------------------------------------------------------------------------
   // 🖥️ UI BUILD
   // ---------------------------------------------------------------------------
-
   @override
   Widget build(BuildContext context) {
-    if (_isLoading)
+    if (_isLoading) {
       return const Scaffold(
-          backgroundColor: Color(0xFFF5F7FA),
-          body: Center(child: CircularProgressIndicator()));
-    if (_order == null)
-      return const Scaffold(body: Center(child: Text("Order not found")));
+          backgroundColor: _surfaceBg,
+          body: SafeArea(child: _OrderDetailsSkeleton()));
+    }
+    if (_order == null) {
+      return Scaffold(
+          backgroundColor: _surfaceBg,
+          body: Center(
+              child: Text("Order not found", style: GoogleFonts.poppins())));
+    }
 
-    final farmer = _order!['farmer'] ?? {};
+    final rawFarmer = _order!['farmer'];
+    final Map<String, dynamic> farmer = rawFarmer is Map
+        ? Map<String, dynamic>.from(rawFarmer)
+        : <String, dynamic>{};
+
     final String farmerName =
         "${farmer['first_name'] ?? 'Farmer'} ${farmer['last_name'] ?? ''}"
             .trim();
     final String farmerLoc =
-        "${farmer['district'] ?? ''}, ${farmer['state'] ?? ''}";
+        "${farmer['district'] ?? ''}, ${farmer['state'] ?? ''}"
+            .replaceAll(RegExp(r'^, |,$'), '')
+            .trim();
+    final String farmerId = _order!['farmer_id']?.toString() ?? '';
 
-    final crop = _order!['crop'];
-    String cropName = crop?['crop_name'] ?? _order!['crop_name'] ?? "Crop";
-    // ✅ NEW DETAILS
-    String variety = crop?['variety'] ?? 'Standard';
-    String grade = crop?['grade'] ?? 'Standard';
+    final rawCrop = _order!['crop'];
+    final Map<String, dynamic> crop = rawCrop is Map
+        ? Map<String, dynamic>.from(rawCrop)
+        : <String, dynamic>{};
+
+    String cropName = crop['crop_name'] ?? _order!['crop_name'] ?? "Crop Item";
+    String? imgUrl = crop['image_url'];
+    String cropVariety = crop['variety'] ?? _order!['variety'] ?? '';
+    String cropGrade = crop['grade'] ?? _order!['grade'] ?? '';
+    String unit = crop['unit'] ?? 'Kg';
+
     String harvestDate = "Available";
-    if (crop != null && crop['harvest_date'] != null) {
+    if (crop['harvest_date'] != null) {
       try {
         harvestDate =
             DateFormat('dd MMM').format(DateTime.parse(crop['harvest_date']));
       } catch (_) {}
     }
 
-    String? rawImgUrl = crop?['image_url'];
-    ImageProvider imgProvider;
+    final double quantity =
+        (num.tryParse(_order!['quantity_kg']?.toString() ?? '0') ?? 0)
+            .toDouble();
+    final double price = (num.tryParse(_order!['price_offered']?.toString() ??
+                crop['price']?.toString() ??
+                '0') ??
+            0)
+        .toDouble();
+    final double totalAmount = quantity * price;
+    final double advancePaid =
+        (num.tryParse(_order!['advance_amount']?.toString() ?? '0') ?? 0)
+            .toDouble();
 
-    if (rawImgUrl != null && rawImgUrl.isNotEmpty) {
-      if (rawImgUrl.startsWith('http')) {
-        imgProvider = NetworkImage(rawImgUrl);
-      } else {
-        final publicUrl =
-            _supabase.storage.from('crop_images').getPublicUrl(rawImgUrl);
-        imgProvider = NetworkImage(publicUrl);
-      }
-    } else {
-      imgProvider = const AssetImage('assets/images/placeholder_crop.png');
-    }
+    String rawStatus =
+        _order!['tracking_status'] ?? _order!['status'] ?? 'Pending';
+    String status = rawStatus.toString().toLowerCase().trim();
 
-    // Money Calculations
-    final quantity = (_order!['quantity_kg'] ?? 0).toDouble();
-    final price = (_order!['price_offered'] ?? 0).toDouble();
-    final totalAmount = quantity * price;
-    final advancePaid = (_order!['advance_amount'] ?? 0).toDouble();
+    final isPending = ['pending', 'requested'].contains(status);
+    final isCancelled = ['rejected', 'cancelled'].contains(status);
+    final isDelivered = ['delivered', 'completed'].contains(status);
+
+    final bool isFullyPaid =
+        totalAmount > 0 && advancePaid >= (totalAmount - 1.0);
+
+    final double fLat = (_order!['transport_lat'] as num?)?.toDouble() ??
+        (farmer['latitude'] as num?)?.toDouble() ??
+        0.0;
+    final double fLng = (_order!['transport_lng'] as num?)?.toDouble() ??
+        (farmer['longitude'] as num?)?.toDouble() ??
+        0.0;
+    final double bLat = (_order!['buyer_lat'] as num?)?.toDouble() ?? 0.0;
+    final double bLng = (_order!['buyer_lng'] as num?)?.toDouble() ?? 0.0;
 
     final scheduleTime = _order!['scheduled_pickup_time'];
     final scheduleText = scheduleTime != null
         ? DateFormat('dd MMM, hh:mm a')
             .format(DateTime.parse(scheduleTime).toLocal())
         : "Tap to Schedule";
-    final deliveryOtp =
-        (widget.orderId.hashCode.abs() % 9000 + 1000).toString();
 
-    return StreamBuilder<List<Map<String, dynamic>>>(
-      stream: _supabase
-          .from('orders')
-          .stream(primaryKey: ['id']).eq('id', widget.orderId),
-      builder: (context, snapshot) {
-        String status =
-            _order!['tracking_status'] ?? _order!['status'] ?? 'Pending';
-        if (snapshot.hasData && snapshot.data!.isNotEmpty) {
-          status = snapshot.data!.first['tracking_status'] ??
-              snapshot.data!.first['status'] ??
-              'Pending';
-        }
+    String fallbackOtp = widget.orderId.replaceAll(RegExp(r'[^0-9]'), '');
+    fallbackOtp = fallbackOtp.length >= 4
+        ? fallbackOtp.substring(0, 4)
+        : fallbackOtp.padRight(4, '0');
+    final String deliveryOtp =
+        _order!['delivery_otp']?.toString() ?? fallbackOtp;
 
-        final isActive = status != 'Pending' &&
-            status != 'Rejected' &&
-            status != 'Cancelled';
-        final isCompleted = status == 'Delivered' || status == 'Completed';
+    if (isDelivered && _isSharingNotifier.value) {
+      Future.delayed(Duration.zero, _stopSharingLocation);
+    }
 
-        // Payment Logic
-        bool isFullyPaid = advancePaid >= (totalAmount - 1.0);
+    double bottomPadding =
+        (isCancelled || isDelivered || isFullyPaid) ? 40 : 260;
 
-        if (isCompleted && _isSharing)
-          Future.delayed(Duration.zero, _stopSharingLocation);
-
-        return Scaffold(
-          backgroundColor: const Color(0xFFF5F7FA),
-          appBar: AppBar(
-            title: const Text("Order Details",
-                style: TextStyle(
-                    color: Colors.black, fontWeight: FontWeight.bold)),
-            backgroundColor: const Color(0xFFF5F7FA),
-            elevation: 0,
-            leading: IconButton(
-                icon: const Icon(Icons.arrow_back, color: Colors.black),
-                onPressed: () => Navigator.pop(context)),
-          ),
-          body: SafeArea(
-            child: Stack(
-              children: [
-                SingleChildScrollView(
-                  padding:
-                      const EdgeInsets.fromLTRB(0, 10, 0, 260), // Edge to Edge
-                  child: Column(
-                    children: [
-                      // 1. PRODUCT CARD (With Details)
-                      _buildProductCard(cropName, variety, grade, harvestDate,
-                          quantity, totalAmount, status, imgProvider),
-                      const SizedBox(height: 12),
-
-                      // 2. BREAKDOWN
-                      _buildBreakdownCard(quantity, totalAmount, advancePaid),
-                      const SizedBox(height: 12),
-
-                      // Schedule
-                      _buildScheduleCard(isActive, scheduleText),
-                      const SizedBox(height: 12),
-
-                      // Tracking & OTP
-                      if (isActive) ...[
-                        Container(
-                          width: double.infinity,
-                          margin: const EdgeInsets.symmetric(horizontal: 16),
-                          padding: const EdgeInsets.all(20),
-                          decoration: BoxDecoration(
-                              color: Colors.white,
-                              borderRadius: BorderRadius.circular(20),
-                              boxShadow: const [
-                                BoxShadow(color: Colors.black12, blurRadius: 5)
-                              ]),
-                          child: Column(children: [
-                            Row(
-                                mainAxisAlignment:
-                                    MainAxisAlignment.spaceBetween,
-                                children: [
-                                  const Text("Shipment Status",
-                                      style: TextStyle(
-                                          fontWeight: FontWeight.bold,
-                                          fontSize: 16)),
-                                  if (_isSharing && !isCompleted)
-                                    Container(
-                                        padding: const EdgeInsets.symmetric(
-                                            horizontal: 8, vertical: 4),
-                                        decoration: BoxDecoration(
-                                            color: Colors.green,
-                                            borderRadius:
-                                                BorderRadius.circular(4)),
-                                        child: const Text("LIVE",
-                                            style: TextStyle(
-                                                color: Colors.white,
-                                                fontSize: 10,
-                                                fontWeight: FontWeight.bold))),
-                                ]),
-                            const SizedBox(height: 20),
-                            _buildCustomTimeline(status),
-                            const SizedBox(height: 20),
-                            if (!isCompleted) ...[
-                              const Divider(),
-                              const SizedBox(height: 10),
-                              Row(
-                                children: [
-                                  const Icon(Icons.vpn_key,
-                                      color: Colors.amber, size: 24),
-                                  const SizedBox(width: 12),
-                                  Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Text("DELIVERY OTP",
-                                          style: GoogleFonts.poppins(
-                                              fontSize: 10,
-                                              fontWeight: FontWeight.bold,
-                                              color: Colors.grey)),
-                                      Text(deliveryOtp,
-                                          style: GoogleFonts.poppins(
-                                              fontSize: 20,
-                                              fontWeight: FontWeight.bold,
-                                              letterSpacing: 2)),
-                                    ],
-                                  )
-                                ],
-                              ),
-                              const SizedBox(height: 15),
-                              _buildTrackingToggle(),
-                              const SizedBox(height: 15),
-                              _buildSimulationMap(),
-                            ]
-                          ]),
-                        ),
-                        const SizedBox(height: 12),
-                      ],
-
-                      // Farmer Info
-                      _buildFarmerCard(farmerName, farmerLoc, status),
-                    ],
-                  ),
-                ),
-
-                // ✅ BOTTOM FLOATING BAR (PAY ADVANCE)
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
-                  child: Container(
-                    padding: const EdgeInsets.fromLTRB(20, 20, 20, 30),
-                    decoration: const BoxDecoration(
-                        color: Colors.white,
-                        borderRadius:
-                            BorderRadius.vertical(top: Radius.circular(24)),
-                        boxShadow: [
-                          BoxShadow(
-                              color: Colors.black12,
-                              blurRadius: 20,
-                              offset: Offset(0, -5))
-                        ]),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        // PAYMENT INFO BLOCK
-                        if (isFullyPaid)
-                          Container(
-                            width: double.infinity,
-                            margin: const EdgeInsets.only(bottom: 12),
-                            padding: const EdgeInsets.all(12),
-                            decoration: BoxDecoration(
-                                color: Colors.green.shade50,
-                                borderRadius: BorderRadius.circular(12)),
-                            child: Center(
-                                child: Text("ORDER FULLY PAID",
-                                    style: GoogleFonts.poppins(
-                                        fontWeight: FontWeight.bold,
-                                        color: Colors.green))),
-                          ),
-
-                        // ACTION BUTTON
-                        if (status == 'Pending')
-                          SizedBox(
-                            width: double.infinity,
-                            height: 54,
-                            child: OutlinedButton(
-                              onPressed: _cancelOrder,
-                              style: OutlinedButton.styleFrom(
-                                  side: const BorderSide(color: Colors.red),
-                                  shape: RoundedRectangleBorder(
-                                      borderRadius: BorderRadius.circular(30))),
-                              child: Text("Cancel Order",
-                                  style: GoogleFonts.poppins(
-                                      fontWeight: FontWeight.bold,
-                                      color: Colors.red,
-                                      fontSize: 16)),
-                            ),
-                          )
-                        else if (!isFullyPaid)
-                          SizedBox(
-                            width: double.infinity,
-                            height: 54,
-                            child: ElevatedButton.icon(
-                              onPressed: () =>
-                                  _triggerPayment(totalAmount, advancePaid),
-                              style: ElevatedButton.styleFrom(
-                                  backgroundColor: _primaryGreen,
-                                  elevation: 4,
-                                  shape: RoundedRectangleBorder(
-                                      borderRadius: BorderRadius.circular(30))),
-                              icon: const Icon(Icons.payment,
-                                  color: Colors.white),
-                              // ✅ Dynamic Text
-                              label: Text(
-                                  advancePaid == 0
-                                      ? "PAY ADVANCE (35%)"
-                                      : "PAY BALANCE",
-                                  style: GoogleFonts.poppins(
-                                      fontWeight: FontWeight.bold,
-                                      color: Colors.white,
-                                      fontSize: 16)),
-                            ),
-                          )
-                        else if (status == 'Shipped' || status == 'Delivered')
-                          SizedBox(
-                            width: double.infinity,
-                            height: 54,
-                            child: ElevatedButton(
-                              onPressed: _confirmReceipt,
-                              style: ElevatedButton.styleFrom(
-                                  backgroundColor: Colors.blue,
-                                  shape: RoundedRectangleBorder(
-                                      borderRadius: BorderRadius.circular(30))),
-                              child: Text("Confirm Receipt",
-                                  style: GoogleFonts.poppins(
-                                      fontWeight: FontWeight.bold,
-                                      color: Colors.white,
-                                      fontSize: 16)),
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
+    return Scaffold(
+      backgroundColor: _surfaceBg,
+      appBar: AppBar(
+        title: Text("Order Details",
+            style: GoogleFonts.poppins(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+                fontSize: 20)),
+        backgroundColor: _primaryBlue,
+        elevation: 0,
+        centerTitle: false,
+        iconTheme: const IconThemeData(color: Colors.white),
+      ),
+      body: SafeArea(
+        child: Stack(
+          children: [
+            SingleChildScrollView(
+              padding: EdgeInsets.fromLTRB(0, 16, 0, bottomPadding),
+              physics: const BouncingScrollPhysics(),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _buildProductCard(crop, cropName, cropVariety, cropGrade,
+                      harvestDate, price, unit, rawStatus, imgUrl),
+                  const SizedBox(height: 16),
+                  _buildBreakdownCard(quantity, totalAmount, advancePaid),
+                  const SizedBox(height: 16),
+                  _buildScheduleCard(
+                      !isPending && !isCancelled && !isDelivered, scheduleText),
+                  const SizedBox(height: 16),
+                  if (!isPending && !isCancelled) ...[
+                    ValueListenableBuilder<bool>(
+                        valueListenable: _isSharingNotifier,
+                        builder: (context, isSharing, child) {
+                          return _buildTrackingBlock(
+                              rawStatus,
+                              isSharing,
+                              deliveryOtp,
+                              isFullyPaid,
+                              isDelivered,
+                              fLat,
+                              fLng,
+                              bLat,
+                              bLng);
+                        }),
+                    const SizedBox(height: 16),
+                  ],
+                  _buildContactCard(
+                      farmerName, farmerLoc, rawStatus, cropName, farmerId),
+                ],
+              ),
             ),
-          ),
-        );
-      },
+            AnimatedPositioned(
+              duration: const Duration(milliseconds: 300),
+              curve: Curves.easeOutCubic,
+              left: 0,
+              right: 0,
+              bottom: (isCancelled || isDelivered || isFullyPaid) ? -300 : 0,
+              child: Container(
+                padding: const EdgeInsets.fromLTRB(20, 20, 20, 30),
+                decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius:
+                        const BorderRadius.vertical(top: Radius.circular(24)),
+                    boxShadow: [
+                      BoxShadow(
+                          color: Colors.black.withOpacity(0.02),
+                          blurRadius: 10,
+                          offset: const Offset(0, -2))
+                    ]),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (isFullyPaid)
+                      Container(
+                        width: double.infinity,
+                        margin: const EdgeInsets.only(bottom: 12),
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                            color: Colors.green.shade50,
+                            borderRadius: BorderRadius.circular(12)),
+                        child: Center(
+                            child: Text("ORDER FULLY PAID",
+                                style: GoogleFonts.poppins(
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.green))),
+                      ),
+                    if (isPending)
+                      SizedBox(
+                        width: double.infinity,
+                        height: 52,
+                        child: OutlinedButton(
+                          onPressed: _isUpdatingStatus ? null : _cancelOrder,
+                          style: OutlinedButton.styleFrom(
+                              side: const BorderSide(color: Colors.red),
+                              shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(30))),
+                          child: _isUpdatingStatus
+                              ? const SizedBox(
+                                  height: 20,
+                                  width: 20,
+                                  child: CircularProgressIndicator(
+                                      color: Colors.red, strokeWidth: 2))
+                              : Text("Cancel Order",
+                                  style: GoogleFonts.poppins(
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.red.shade700,
+                                      fontSize: 16)),
+                        ),
+                      )
+                    else if (!isFullyPaid)
+                      SizedBox(
+                        width: double.infinity,
+                        height: 52,
+                        child: ElevatedButton.icon(
+                          onPressed: _isUpdatingStatus
+                              ? null
+                              : () => _triggerPayment(totalAmount, advancePaid),
+                          style: ElevatedButton.styleFrom(
+                              backgroundColor: _primaryBlue,
+                              elevation: 4,
+                              shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(30))),
+                          icon: _isUpdatingStatus
+                              ? const SizedBox.shrink()
+                              : const Icon(Icons.payment, color: Colors.white),
+                          label: _isUpdatingStatus
+                              ? const SizedBox(
+                                  height: 20,
+                                  width: 20,
+                                  child: CircularProgressIndicator(
+                                      color: Colors.white, strokeWidth: 2))
+                              : Text("PAY BALANCE",
+                                  style: GoogleFonts.poppins(
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.white,
+                                      fontSize: 16)),
+                        ),
+                      )
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
   // --- WIDGETS ---
 
-  // ✅ IMPROVED HEADER: Includes Variety, Grade, Date
   Widget _buildProductCard(
+      Map<String, dynamic> cropMap,
       String name,
       String variety,
       String grade,
       String date,
-      double qty,
-      double amount,
+      double pricePerUnit,
+      String unit,
       String status,
-      ImageProvider img) {
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.symmetric(horizontal: 16), // Curved
-      padding: const EdgeInsets.all(24),
-      decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(20),
-          boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 5)]),
-      child: Row(children: [
-        ClipRRect(
-            borderRadius: BorderRadius.circular(16),
-            child: SizedBox(
-                height: 110,
-                width: 110,
-                child: Image(image: img, fit: BoxFit.cover))),
-        const SizedBox(width: 20),
-        Expanded(
-            child:
-                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(name,
-              style:
-                  const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 6),
-          Text("$variety • $grade",
-              style: TextStyle(color: Colors.grey[700], fontSize: 13)),
-          Text("Harvest: $date",
-              style: TextStyle(color: Colors.grey[700], fontSize: 13)),
-          const SizedBox(height: 10),
-          _buildStatusBadge(status)
-        ]))
-      ]),
-    );
-  }
-
-  // ✅ RECEIPT STYLE BREAKDOWN
-  Widget _buildBreakdownCard(double qty, double total, double paid) {
+      String? rawImgUrl) {
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.symmetric(horizontal: 16),
@@ -749,30 +966,151 @@ class _BuyerOrderDetailScreenState extends State<BuyerOrderDetailScreen>
       decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: Colors.grey.shade200)),
-      child: Column(children: [
-        _row("Total Quantity", "$qty Kg"),
-        const SizedBox(height: 8),
-        _row("Total Price", "₹${NumberFormat('#,##0').format(total)}",
-            isBold: true),
-        const Divider(height: 24),
-        _row("Paid Amount", "₹${NumberFormat('#,##0').format(paid)}",
-            color: Colors.green),
-        const SizedBox(height: 8),
-        _row("Pending", "₹${NumberFormat('#,##0').format(total - paid)}",
-            color: Colors.orange),
+          border: Border.all(color: Colors.grey.shade200),
+          boxShadow: [
+            BoxShadow(
+                color: Colors.black.withOpacity(0.03),
+                blurRadius: 15,
+                offset: const Offset(0, 5))
+          ]),
+      child: Row(children: [
+        GestureDetector(
+          onTap: () {
+            Navigator.push(
+                context,
+                PageRouteBuilder(
+                  transitionDuration: const Duration(milliseconds: 300),
+                  pageBuilder: (_, __, ___) => _CropDetailScreen(
+                      crop: cropMap,
+                      imgUrl: rawImgUrl,
+                      heroTag: 'buyer_order_img_${widget.orderId}'),
+                  transitionsBuilder: (_, anim, __, child) =>
+                      FadeTransition(opacity: anim, child: child),
+                ));
+          },
+          child: Container(
+            height: 100,
+            width: 100,
+            decoration: BoxDecoration(
+                color: Colors.grey.shade100,
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: Colors.grey.shade200)),
+            child: Material(
+              color: Colors.transparent,
+              borderRadius: BorderRadius.circular(15),
+              child: ClipRRect(
+                  borderRadius: BorderRadius.circular(15),
+                  child: Hero(
+                    tag: 'buyer_order_img_${widget.orderId}',
+                    child: (rawImgUrl != null && rawImgUrl.isNotEmpty)
+                        ? CachedNetworkImage(
+                            imageUrl: rawImgUrl.startsWith('http')
+                                ? rawImgUrl
+                                : _supabase.storage
+                                    .from('crop_images')
+                                    .getPublicUrl(rawImgUrl),
+                            fit: BoxFit.cover,
+                            memCacheWidth: 250,
+                            placeholder: (c, u) =>
+                                Container(color: Colors.grey.shade100),
+                            errorWidget: (c, u, e) => const Icon(
+                                Icons.image_not_supported,
+                                color: Colors.grey))
+                        : Image.asset('assets/images/placeholder_crop.png',
+                            fit: BoxFit.cover),
+                  )),
+            ),
+          ),
+        ),
+        const SizedBox(width: 20),
+        Expanded(
+            child:
+                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(name,
+              style: GoogleFonts.poppins(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.black87,
+                  height: 1.2)),
+          const SizedBox(height: 4),
+          Text("$variety • $grade",
+              style: GoogleFonts.poppins(
+                  color: Colors.grey.shade600, fontSize: 13)),
+          Text("Harvest: $date",
+              style: GoogleFonts.poppins(
+                  color: Colors.grey.shade600, fontSize: 13)),
+          const SizedBox(height: 12),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Flexible(
+                  child: Text("₹${pricePerUnit.toStringAsFixed(0)} / $unit",
+                      style: GoogleFonts.jetBrainsMono(
+                          fontSize: 15,
+                          fontWeight: FontWeight.bold,
+                          color: _primaryGreen),
+                      overflow: TextOverflow.ellipsis)),
+              _buildStatusBadge(status)
+            ],
+          )
+        ]))
       ]),
     );
   }
 
-  Widget _row(String label, String val, {bool isBold = false, Color? color}) {
+  Widget _buildBreakdownCard(double qty, double total, double paid) {
+    String qtyText = qty == qty.roundToDouble()
+        ? qty.toStringAsFixed(0)
+        : qty.toStringAsFixed(2);
+
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: Colors.grey.shade200),
+          boxShadow: [
+            BoxShadow(
+                color: Colors.black.withOpacity(0.03),
+                blurRadius: 15,
+                offset: const Offset(0, 5))
+          ]),
+      child: Column(children: [
+        _row("Total Quantity", "$qtyText Kg", isNumber: true),
+        const SizedBox(height: 12),
+        _row("Total Price", "₹${NumberFormat('#,##0').format(total)}",
+            isBold: true, isNumber: true),
+        const Padding(
+            padding: EdgeInsets.symmetric(vertical: 16),
+            child: Divider(height: 1)),
+        _row("Amount Paid", "₹${NumberFormat('#,##0').format(paid)}",
+            color: _primaryGreen, isNumber: true),
+        const SizedBox(height: 12),
+        _row(
+            "Pending Balance", "₹${NumberFormat('#,##0').format(total - paid)}",
+            color: Colors.red.shade700, isBold: true, isNumber: true),
+      ]),
+    );
+  }
+
+  Widget _row(String label, String val,
+      {bool isBold = false, Color? color, bool isNumber = false}) {
     return Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-      Text(label, style: GoogleFonts.poppins(color: Colors.grey[600])),
+      Text(label,
+          style:
+              GoogleFonts.poppins(color: Colors.grey.shade600, fontSize: 14)),
       Text(val,
-          style: GoogleFonts.poppins(
-              fontWeight: isBold ? FontWeight.bold : FontWeight.w600,
-              fontSize: 15,
-              color: color ?? Colors.black))
+          style: isNumber
+              ? GoogleFonts.jetBrainsMono(
+                  fontWeight: isBold ? FontWeight.bold : FontWeight.w600,
+                  fontSize: 15,
+                  color: color ?? Colors.black87)
+              : GoogleFonts.poppins(
+                  fontWeight: isBold ? FontWeight.bold : FontWeight.w600,
+                  fontSize: 15,
+                  color: color ?? Colors.black87))
     ]);
   }
 
@@ -782,150 +1120,426 @@ class _BuyerOrderDetailScreenState extends State<BuyerOrderDetailScreen>
       child: Container(
         width: double.infinity,
         margin: const EdgeInsets.symmetric(horizontal: 16),
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
         decoration: BoxDecoration(
-            color: Colors.blue[50],
+            color: Colors.blue.shade50,
             borderRadius: BorderRadius.circular(20),
             border: Border.all(color: Colors.blue.shade100)),
         child: Row(children: [
-          const Icon(Icons.calendar_month, color: Colors.blue),
+          const Icon(Icons.calendar_month_rounded, color: _primaryBlue),
           const SizedBox(width: 16),
-          Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const Text("Scheduled Pickup",
-                style:
-                    TextStyle(color: Colors.blue, fontWeight: FontWeight.bold)),
-            Text(text,
-                style:
-                    const TextStyle(fontWeight: FontWeight.bold, fontSize: 16))
+          Expanded(
+            child:
+                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text("Scheduled Pickup",
+                  style: GoogleFonts.poppins(
+                      color: _primaryBlue,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 12,
+                      letterSpacing: 0.5)),
+              Text(text,
+                  style: GoogleFonts.poppins(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 15,
+                      color: Colors.black87))
+            ]),
+          ),
+          if (isActive)
+            const Icon(Icons.edit_rounded, size: 20, color: _primaryBlue)
+        ]),
+      ),
+    );
+  }
+
+  Widget _buildTrackingBlock(
+      String status,
+      bool sharing,
+      String deliveryOtp,
+      bool isFullyPaid,
+      bool isDelivered,
+      double fLat,
+      double fLng,
+      double bLat,
+      double bLng) {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: Colors.grey.shade200),
+          boxShadow: [
+            BoxShadow(
+                color: Colors.black.withOpacity(0.03),
+                blurRadius: 15,
+                offset: const Offset(0, 5))
           ]),
-          const Spacer(),
-          if (isActive) const Icon(Icons.edit, size: 18, color: Colors.blue)
+      child: Column(children: [
+        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+          Text("Tracking",
+              style: GoogleFonts.poppins(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 16,
+                  color: Colors.black87)),
+          if (sharing && !isDelivered) _buildLiveBadge(),
         ]),
+        const SizedBox(height: 24),
+        _buildCustomTimeline(status),
+        const SizedBox(height: 24),
+        if (!isDelivered) ...[
+          const Divider(),
+          const SizedBox(height: 12),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                      color: isFullyPaid
+                          ? Colors.green.shade50
+                          : Colors.red.shade50,
+                      shape: BoxShape.circle),
+                  child: Icon(
+                      isFullyPaid ? Icons.vpn_key_rounded : Icons.lock_rounded,
+                      color: isFullyPaid ? _primaryGreen : Colors.red.shade600,
+                      size: 24)),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text("DELIVERY OTP",
+                        style: GoogleFonts.poppins(
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.grey.shade500,
+                            letterSpacing: 1)),
+                    Text(isFullyPaid ? deliveryOtp : "****",
+                        style: GoogleFonts.jetBrainsMono(
+                            fontSize: 22,
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: 4,
+                            color: isFullyPaid
+                                ? Colors.black87
+                                : Colors.red.shade600)),
+                    if (!isFullyPaid)
+                      Text("Pay balance to unlock",
+                          style: GoogleFonts.poppins(
+                              color: Colors.red.shade600,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600)),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 20),
+          SizedBox(
+              width: double.infinity,
+              height: 48,
+              child: ElevatedButton.icon(
+                  onPressed: () {
+                    if (sharing) {
+                      _stopSharingLocation();
+                    } else {
+                      _startSharingLocation(isAutoResume: false);
+                    }
+                  },
+                  style: ElevatedButton.styleFrom(
+                      backgroundColor:
+                          sharing ? Colors.red.shade50 : _primaryBlue,
+                      foregroundColor:
+                          sharing ? Colors.red.shade700 : Colors.white,
+                      elevation: 0,
+                      side: sharing
+                          ? BorderSide(color: Colors.red.shade300)
+                          : BorderSide.none,
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12))),
+                  icon: Icon(sharing
+                      ? Icons.stop_rounded
+                      : Icons.directions_car_rounded),
+                  label: Text(sharing ? "End Trip" : "Start Trip to Farm",
+                      style:
+                          GoogleFonts.poppins(fontWeight: FontWeight.bold)))),
+          const SizedBox(height: 16),
+          if (sharing) ...[
+            GestureDetector(
+              onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                      builder: (_) =>
+                          FullScreenTracking(orderId: widget.orderId))),
+              child: Container(
+                height: 120,
+                width: double.infinity,
+                decoration: BoxDecoration(
+                    color: const Color(0xFFEDF2F7),
+                    borderRadius: BorderRadius.circular(15),
+                    border: Border.all(color: Colors.grey.shade300)),
+                child: Stack(children: [
+                  Positioned.fill(child: CustomPaint(painter: _RoutePainter())),
+                  const Positioned(
+                      left: 20,
+                      bottom: 40,
+                      child: _MapMarker(
+                          label: "Farm",
+                          icon: Icons.store,
+                          color: Colors.brown)),
+                  ValueListenableBuilder<double>(
+                      valueListenable: _progressNotifier,
+                      builder: (context, progress, child) {
+                        return AnimatedAlign(
+                            duration: const Duration(seconds: 1),
+                            curve: Curves.easeInOut,
+                            alignment: Alignment(
+                                ui.lerpDouble(-0.8, 0.8, progress)!, 0),
+                            child: const Icon(Icons.local_shipping,
+                                color: Colors.blueAccent, size: 30));
+                      }),
+                  const Positioned(
+                      right: 10,
+                      bottom: 10,
+                      child:
+                          Icon(Icons.fullscreen, size: 20, color: Colors.grey)),
+                ]),
+              ),
+            ),
+            const SizedBox(height: 16),
+            ValueListenableBuilder<double?>(
+              valueListenable: _distanceNotifier,
+              builder: (context, distance, child) {
+                if (distance == null) return const SizedBox.shrink();
+                String distText = (distance > 1000)
+                    ? "${(distance / 1000).toStringAsFixed(1)} km"
+                    : "${distance.round()} m";
+
+                return Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+                  decoration: BoxDecoration(
+                      color: _primaryBlue.withOpacity(0.05),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: _primaryBlue.withOpacity(0.1))),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      _buildStatColumn(Icons.map_rounded, "Distance", distText),
+                      Container(
+                          width: 1,
+                          height: 40,
+                          color: _primaryBlue.withOpacity(0.2)),
+                      _buildStatColumn(Icons.timer_rounded, "Est. Time",
+                          "${(distance / 1000 / 40 * 60).round()} mins"),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ] else ...[
+            Container(
+                height: 120,
+                width: double.infinity,
+                decoration: BoxDecoration(
+                    color: Colors.grey.shade100,
+                    borderRadius: BorderRadius.circular(15),
+                    border: Border.all(color: Colors.grey.shade300)),
+                child: Center(
+                    child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                      Icon(Icons.map_rounded,
+                          size: 30, color: Colors.grey.shade400),
+                      const SizedBox(height: 8),
+                      Text("Click 'Start Trip' to unlock map",
+                          style: GoogleFonts.poppins(
+                              color: Colors.grey.shade500,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w500))
+                    ])))
+          ]
+        ] else ...[
+          Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              decoration: BoxDecoration(
+                  color: Colors.green.shade50,
+                  borderRadius: BorderRadius.circular(12)),
+              child:
+                  Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                Icon(Icons.check_circle,
+                    color: Colors.green.shade700, size: 20),
+                const SizedBox(width: 8),
+                Text("Order Delivered Successfully",
+                    style: GoogleFonts.poppins(
+                        color: Colors.green.shade700,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 13))
+              ]))
+        ]
+      ]),
+    );
+  }
+
+  Widget _buildStatColumn(IconData icon, String label, String value) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(children: [
+          Icon(icon, size: 14, color: _primaryBlue),
+          const SizedBox(width: 6),
+          Text(label,
+              style: GoogleFonts.poppins(
+                  fontSize: 11,
+                  color: _primaryBlue,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 0.5))
+        ]),
+        const SizedBox(height: 4),
+        Text(value,
+            style: GoogleFonts.jetBrainsMono(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+                color: Colors.black87)),
+      ],
+    );
+  }
+
+  Widget _buildLiveBadge() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+          color: Colors.red.shade600, borderRadius: BorderRadius.circular(100)),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.fiber_manual_record, color: Colors.white, size: 8),
+          const SizedBox(width: 4),
+          Text("LIVE",
+              style: GoogleFonts.poppins(
+                  color: Colors.white,
+                  fontSize: 10,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 0.5)),
+        ],
       ),
     );
   }
 
-  Widget _buildTrackingToggle() {
-    return SizedBox(
-        width: double.infinity,
-        child: OutlinedButton.icon(
-            onPressed:
-                _isSharing ? _stopSharingLocation : _startSharingLocation,
-            icon: Icon(_isSharing ? Icons.stop : Icons.navigation,
-                color: _isSharing ? Colors.red : Colors.blue),
-            label: Text(_isSharing ? "Stop Sharing" : "Start Live GPS",
-                style:
-                    TextStyle(color: _isSharing ? Colors.red : Colors.blue))));
-  }
-
-  Widget _buildSimulationMap() {
-    return GestureDetector(
-      onTap: () {
-        if (_isSharing)
-          Navigator.push(
-              context,
-              MaterialPageRoute(
-                  builder: (_) => FullScreenTracking(orderId: widget.orderId)));
-        else
-          _showSnack("Start GPS first!", Colors.blue);
-      },
-      child: Container(
-        height: 120,
-        width: double.infinity,
-        decoration: BoxDecoration(
-            color: const Color(0xFFEDF2F7),
-            borderRadius: BorderRadius.circular(15),
-            border: Border.all(color: Colors.grey.shade300)),
-        child: Stack(children: [
-          Positioned.fill(child: CustomPaint(painter: _RoutePainter())),
-          const Positioned(
-              left: 20,
-              top: 45,
-              child: _MapMarker(label: "You", icon: Icons.my_location)),
-          const Positioned(
-              right: 20,
-              top: 45,
-              child: _MapMarker(label: "Farm", icon: Icons.store)),
-          AnimatedAlign(
-              duration: const Duration(seconds: 1),
-              curve: Curves.easeInOut,
-              alignment: Alignment(ui.lerpDouble(-0.8, 0.8, _progress)!, 0),
-              child: const Icon(Icons.local_shipping,
-                  color: Colors.blueAccent, size: 30)),
-        ]),
-      ),
-    );
-  }
-
-  Widget _buildFarmerCard(String name, String loc, String status) {
+  Widget _buildContactCard(
+      String name, String loc, String status, String cropName, String id) {
     return Container(
         width: double.infinity,
         margin: const EdgeInsets.symmetric(horizontal: 16),
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(20),
         decoration: BoxDecoration(
             color: Colors.white,
             borderRadius: BorderRadius.circular(20),
-            boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 5)]),
+            border: Border.all(color: Colors.grey.shade200),
+            boxShadow: [
+              BoxShadow(
+                  color: Colors.black.withOpacity(0.03),
+                  blurRadius: 15,
+                  offset: const Offset(0, 5))
+            ]),
         child: Row(children: [
           CircleAvatar(
-              radius: 24,
-              backgroundColor: Colors.amber.shade100,
-              child: Text(name.isNotEmpty ? name[0] : "F")),
+              radius: 26,
+              backgroundColor: Colors.blue.shade50,
+              child: Text(name.isNotEmpty ? name[0].toUpperCase() : "F",
+                  style: GoogleFonts.poppins(
+                      fontWeight: FontWeight.bold,
+                      color: _primaryBlue,
+                      fontSize: 20))),
           const SizedBox(width: 16),
           Expanded(
               child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                Text(name, style: const TextStyle(fontWeight: FontWeight.bold)),
-                Text("Farmer • $loc",
-                    style: const TextStyle(color: Colors.grey))
+                Text("Farmer Details",
+                    style: GoogleFonts.poppins(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 11,
+                        color: Colors.grey.shade500)),
+                Text(name,
+                    style: GoogleFonts.poppins(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 16,
+                        color: Colors.black87)),
+                const SizedBox(height: 4),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(Icons.location_on_rounded,
+                        size: 14, color: Colors.grey.shade500),
+                    const SizedBox(width: 6),
+                    Expanded(
+                        child: Text(loc.isEmpty ? 'Address not provided' : loc,
+                            style: GoogleFonts.poppins(
+                                color: Colors.grey.shade600, fontSize: 13),
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis)),
+                  ],
+                )
               ])),
-          IconButton.filled(
-              onPressed: () => Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                      builder: (_) => ChatScreen(
-                          targetUserId: _order!['farmer_id'],
-                          targetName: name,
-                          orderId: widget.orderId,
-                          cropName: "Support",
-                          orderStatus: status))),
+          IconButton(
+              onPressed: () {
+                if (id.isNotEmpty) {
+                  Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                          builder: (_) => ChatScreen(
+                              targetUserId: id,
+                              targetName: name,
+                              orderId: widget.orderId,
+                              cropName: cropName,
+                              orderStatus: status)));
+                }
+              },
               style: IconButton.styleFrom(
-                  backgroundColor: const Color(0xFF2E7D32)),
-              icon: const Icon(Icons.chat_bubble_outline, color: Colors.white)),
-          const SizedBox(width: 10),
-          IconButton.filled(
-              onPressed: () => _contactUser(_order!['farmer']['phone']),
-              style: IconButton.styleFrom(backgroundColor: Colors.blue),
-              icon: const Icon(Icons.phone, color: Colors.white))
+                  backgroundColor: _primaryBlue,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12))),
+              icon: const Icon(Icons.chat_bubble_outline_rounded,
+                  color: Colors.white)),
         ]));
   }
 
   Widget _buildStatusBadge(String status) {
+    String lower = status.toLowerCase();
     Color color =
-        (status == 'Accepted' || status == 'Confirmed' || status == 'Completed')
-            ? Colors.green
-            : (status == 'Rejected' ? Colors.red : Colors.orange);
+        (['accepted', 'confirmed', 'completed', 'delivered'].contains(lower))
+            ? _primaryGreen
+            : (['rejected', 'cancelled'].contains(lower)
+                ? Colors.red.shade700
+                : const Color(0xFFF57C00));
     return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         decoration: BoxDecoration(
             color: color.withOpacity(0.1),
-            borderRadius: BorderRadius.circular(20)),
-        child: Text(status,
-            style: TextStyle(
-                color: color, fontSize: 12, fontWeight: FontWeight.bold)));
+            borderRadius: BorderRadius.circular(100)),
+        child: Text(status.toUpperCase(),
+            style: GoogleFonts.poppins(
+                color: color,
+                fontSize: 10,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 0.5)));
   }
 
   Widget _buildCustomTimeline(String currentStatus) {
-    int currentStep = (['Accepted', 'Confirmed'].contains(currentStatus))
+    String lower = currentStatus.toLowerCase();
+    int currentStep = (['accepted', 'confirmed'].contains(lower))
         ? 0
-        : (currentStatus == 'Packed')
+        : (lower == 'packed')
             ? 1
-            : (['Shipped', 'In Transit'].contains(currentStatus))
+            : (['shipped', 'in transit', 'out for delivery'].contains(lower))
                 ? 2
-                : (['Delivered', 'Completed'].contains(currentStatus))
+                : (['delivered', 'completed'].contains(lower))
                     ? 3
                     : 0;
+
     return Row(children: [
       _step("Confirmed", 0, currentStep),
       _line(0, currentStep),
@@ -940,12 +1554,19 @@ class _BuyerOrderDetailScreenState extends State<BuyerOrderDetailScreen>
   Widget _step(String label, int idx, int curr) {
     bool done = idx <= curr;
     return Column(children: [
-      Icon(Icons.check_circle,
-          color: done ? Colors.green : Colors.grey.shade300, size: 24),
-      const SizedBox(height: 4),
+      Container(
+          padding: const EdgeInsets.all(4),
+          decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: done ? _primaryGreen : Colors.grey.shade200),
+          child: const Icon(Icons.check_circle_rounded,
+              color: Colors.white, size: 16)),
+      const SizedBox(height: 8),
       Text(label,
-          style:
-              TextStyle(fontSize: 10, color: done ? Colors.black : Colors.grey))
+          style: GoogleFonts.poppins(
+              fontSize: 10,
+              fontWeight: done ? FontWeight.bold : FontWeight.w500,
+              color: done ? Colors.black87 : Colors.grey.shade500))
     ]);
   }
 
@@ -953,24 +1574,108 @@ class _BuyerOrderDetailScreenState extends State<BuyerOrderDetailScreen>
     return Expanded(
         child: Container(
             height: 2,
-            color: idx < curr ? Colors.green : Colors.grey.shade300,
-            margin: const EdgeInsets.only(bottom: 20)));
+            color: idx < curr ? _primaryGreen : Colors.grey.shade200,
+            margin: const EdgeInsets.only(bottom: 24)));
   }
 }
 
+// ============================================================================
+// ✅ THE SKELETON LOADER
+// ============================================================================
+class _OrderDetailsSkeleton extends StatelessWidget {
+  const _OrderDetailsSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(0, 16, 0, 16),
+      child: Column(
+        children: [
+          Container(
+            width: double.infinity,
+            margin: const EdgeInsets.symmetric(horizontal: 16),
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: Colors.grey.shade200)),
+            child: Row(children: [
+              Container(
+                  height: 100,
+                  width: 100,
+                  decoration: BoxDecoration(
+                      color: Colors.grey.shade100,
+                      borderRadius: BorderRadius.circular(16))),
+              const SizedBox(width: 20),
+              Expanded(
+                  child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                    Container(
+                        height: 20, width: 150, color: Colors.grey.shade100),
+                    const SizedBox(height: 8),
+                    Container(
+                        height: 14, width: 100, color: Colors.grey.shade100),
+                    const SizedBox(height: 8),
+                    Container(
+                        height: 14, width: 120, color: Colors.grey.shade100),
+                    const SizedBox(height: 16),
+                    Container(
+                        height: 20, width: 80, color: Colors.grey.shade100),
+                  ]))
+            ]),
+          ),
+          const SizedBox(height: 16),
+          Container(
+            width: double.infinity,
+            margin: const EdgeInsets.symmetric(horizontal: 16),
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: Colors.grey.shade200)),
+            child: Column(children: [
+              Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                Container(height: 14, width: 100, color: Colors.grey.shade100),
+                Container(height: 14, width: 50, color: Colors.grey.shade100)
+              ]),
+              const SizedBox(height: 16),
+              Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                Container(height: 16, width: 120, color: Colors.grey.shade100),
+                Container(height: 16, width: 80, color: Colors.grey.shade100)
+              ]),
+              const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 16),
+                  child: Divider(height: 1)),
+              Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                Container(height: 14, width: 100, color: Colors.grey.shade100),
+                Container(height: 14, width: 60, color: Colors.grey.shade100)
+              ]),
+            ]),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ============================================================================
+// ✅ MAP HELPER CLASSES
+// ============================================================================
 class _MapMarker extends StatelessWidget {
   final String label;
   final IconData icon;
-  const _MapMarker({required this.label, required this.icon});
+  final Color color;
+  const _MapMarker(
+      {required this.label, required this.icon, this.color = Colors.black});
   @override
-  Widget build(BuildContext context) {
-    return Column(children: [
-      Icon(icon, color: Colors.grey[700], size: 24),
-      const SizedBox(height: 4),
-      Text(label,
-          style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold))
-    ]);
-  }
+  Widget build(BuildContext context) => Column(children: [
+        Icon(icon, color: color, size: 24),
+        const SizedBox(height: 4),
+        Text(label,
+            style:
+                GoogleFonts.poppins(fontSize: 10, fontWeight: FontWeight.bold))
+      ]);
 }
 
 class _RoutePainter extends CustomPainter {
@@ -991,4 +1696,121 @@ class _RoutePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(old) => false;
+}
+
+// ============================================================================
+// ✅ THE INLINE CROP VIEWER
+// ============================================================================
+class _CropDetailScreen extends StatelessWidget {
+  final Map<String, dynamic> crop;
+  final String? imgUrl;
+  final String heroTag;
+
+  const _CropDetailScreen(
+      {required this.crop, required this.imgUrl, required this.heroTag});
+
+  @override
+  Widget build(BuildContext context) {
+    // ✅ MICRO-BUG FIX: Prevent crash if crop data is completely empty
+    final String cropName = crop['crop_name'] ?? "Crop Details";
+    final String variety = crop['variety'] ?? "Standard";
+    final String grade = crop['grade'] ?? "Standard";
+    final String desc =
+        crop['description'] ?? "No additional description provided.";
+
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: CustomScrollView(
+        physics: const BouncingScrollPhysics(),
+        slivers: [
+          SliverAppBar(
+            expandedHeight: MediaQuery.of(context).size.height * 0.55,
+            pinned: true,
+            backgroundColor: Colors.black,
+            iconTheme: const IconThemeData(color: Colors.white),
+            flexibleSpace: FlexibleSpaceBar(
+              background: Hero(
+                tag: heroTag,
+                child: (imgUrl != null && imgUrl!.isNotEmpty)
+                    ? CachedNetworkImage(
+                        imageUrl: imgUrl!.startsWith('http')
+                            ? imgUrl!
+                            : Supabase.instance.client.storage
+                                .from('crop_images')
+                                .getPublicUrl(imgUrl!),
+                        fit: BoxFit.cover,
+                        placeholder: (context, url) =>
+                            Container(color: Colors.grey.shade900),
+                        errorWidget: (context, url, error) =>
+                            const Icon(Icons.broken_image, color: Colors.grey),
+                      )
+                    : Container(color: Colors.grey.shade900),
+              ),
+            ),
+          ),
+          SliverToBoxAdapter(
+            child: Container(
+              padding: const EdgeInsets.all(24),
+              decoration: const BoxDecoration(
+                  color: Colors.white,
+                  borderRadius:
+                      BorderRadius.vertical(top: Radius.circular(24))),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(cropName,
+                      style: GoogleFonts.poppins(
+                          fontSize: 28,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.black87)),
+                  const SizedBox(height: 16),
+                  Row(
+                    children: [
+                      Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 6),
+                          decoration: BoxDecoration(
+                              color: const Color(0xFF1565C0).withOpacity(0.1),
+                              borderRadius: BorderRadius.circular(8)),
+                          child: Text("Variety: $variety",
+                              style: GoogleFonts.poppins(
+                                  color: const Color(0xFF1565C0),
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 13))),
+                      const SizedBox(width: 12),
+                      Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 6),
+                          decoration: BoxDecoration(
+                              color: Colors.grey.shade100,
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(color: Colors.grey.shade300)),
+                          child: Text("Grade: $grade",
+                              style: GoogleFonts.poppins(
+                                  color: Colors.grey.shade800,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 13))),
+                    ],
+                  ),
+                  const SizedBox(height: 32),
+                  Text("Description",
+                      style: GoogleFonts.poppins(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.black87)),
+                  const SizedBox(height: 12),
+                  Text(desc,
+                      style: GoogleFonts.poppins(
+                          fontSize: 15,
+                          color: Colors.grey.shade700,
+                          height: 1.6)),
+                  const SizedBox(height: 200),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }

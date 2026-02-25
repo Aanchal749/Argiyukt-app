@@ -1,13 +1,15 @@
 import 'dart:io';
+import 'dart:async'; // 🛡️ Required for Timeouts
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart'; // 🔬 Required for strict input formatters
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:uuid/uuid.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:image_cropper/image_cropper.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 
-// ❌ Removed external import to make this file self-contained
-// import 'package:agriyukt_app/core/services/location_service.dart';
+// ✅ ACTIVE: Using your actual Location Service
+import 'package:agriyukt_app/core/services/location_service.dart';
 
 class AddFarmerScreen extends StatefulWidget {
   const AddFarmerScreen({super.key});
@@ -19,7 +21,14 @@ class AddFarmerScreen extends StatefulWidget {
 class _AddFarmerScreenState extends State<AddFarmerScreen> {
   final _formKey = GlobalKey<FormState>();
   final _supabase = Supabase.instance.client;
+
+  // 🛡️ Logic Guards
   bool _isLoading = false;
+  bool _isProcessingImage = false;
+  bool _isSubmitting = false;
+
+  // 🛡️ Persistent OCR Recognizer
+  final TextRecognizer _textRecognizer = TextRecognizer();
 
   // --- 1. PERSONAL CONTROLLERS ---
   final _firstNameCtrl = TextEditingController();
@@ -91,11 +100,14 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
     _bankAccCtrl.dispose();
     _bankIfscCtrl.dispose();
     _bankNameCtrl.dispose();
+    _textRecognizer.close();
     super.dispose();
   }
 
   // --- IMAGE PICKER & OCR LOGIC ---
   Future<void> _pickImage(bool isFront) async {
+    if (_isProcessingImage || _isSubmitting) return;
+
     final ImageSource? source = await showModalBottomSheet<ImageSource>(
       context: context,
       backgroundColor: Colors.white,
@@ -122,11 +134,17 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
     if (source == null) return;
 
     try {
-      final picker = ImagePicker();
-      final img = await picker.pickImage(source: source);
-      if (img == null) return;
+      setState(() => _isProcessingImage = true);
 
-      // Crop the image
+      final picker = ImagePicker();
+      final img = await picker.pickImage(
+          source: source, imageQuality: 70, maxWidth: 1920);
+
+      if (img == null) {
+        setState(() => _isProcessingImage = false);
+        return;
+      }
+
       CroppedFile? cropped = await ImageCropper().cropImage(
         sourcePath: img.path,
         uiSettings: [
@@ -136,6 +154,10 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
             toolbarWidgetColor: Colors.white,
             initAspectRatio: CropAspectRatioPreset.ratio16x9,
             lockAspectRatio: false,
+          ),
+          // 🔬 Micro-fix: Prevent fatal crashes on iOS devices
+          IOSUiSettings(
+            title: isFront ? 'Crop Front Side' : 'Crop Back Side',
           ),
         ],
       );
@@ -154,21 +176,29 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
       }
     } catch (e) {
       debugPrint("Image Error: $e");
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text("Error processing image. Please try again."),
+            backgroundColor: Colors.red));
+      }
+    } finally {
+      if (mounted) setState(() => _isProcessingImage = false);
     }
   }
 
   Future<void> _processImage(File image, bool isFront) async {
     final input = InputImage.fromFile(image);
-    final recognizer = TextRecognizer();
+
     try {
-      final text = await recognizer.processImage(input);
+      final text = await _textRecognizer.processImage(input);
       String fullText = text.text.toLowerCase().replaceAll("\n", " ");
 
       if (isFront) {
         bool hasKeywords = fullText.contains("government") ||
             fullText.contains("india") ||
             fullText.contains("dob");
-        RegExp digitRegex = RegExp(r'[2-9]{1}[0-9]{3}\s[0-9]{4}\s[0-9]{4}');
+
+        RegExp digitRegex = RegExp(r'[2-9][0-9]{3}\s?[0-9]{4}\s?[0-9]{4}');
         var match = digitRegex.firstMatch(text.text);
 
         if (mounted) {
@@ -192,13 +222,13 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
       }
     } catch (e) {
       debugPrint("OCR Error: $e");
-    } finally {
-      recognizer.close();
     }
   }
 
   // --- SUBMISSION LOGIC ---
   Future<void> _registerFarmer() async {
+    if (_isSubmitting || _isProcessingImage) return;
+
     if (!_formKey.currentState!.validate()) return;
 
     if (_selectedStateId == null || _selectedDistrictId == null) {
@@ -208,57 +238,81 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
       return;
     }
 
-    setState(() => _isLoading = true);
+    if (_frontImage == null || _backImage == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text("Please upload both front and back of Aadhar ID"),
+          backgroundColor: Colors.red));
+      return;
+    }
+
+    setState(() {
+      _isLoading = true;
+      _isSubmitting = true;
+    });
+
+    List<String> uploadedPaths = [];
 
     try {
       final inspector = _supabase.auth.currentUser;
       if (inspector == null) throw "Inspector not logged in";
 
-      // 1. Check Duplicates
       final existingFarmer = await _supabase
           .from('profiles')
           .select('id')
           .eq('phone', _phoneCtrl.text.trim())
-          .maybeSingle();
+          .maybeSingle()
+          .timeout(const Duration(seconds: 15));
 
       if (existingFarmer != null) {
         throw "Farmer with this phone number already exists!";
       }
 
-      // 2. Upload Images
+      final newFarmerId = const Uuid().v4();
       String frontUrl = "";
       String backUrl = "";
       String time = DateTime.now().millisecondsSinceEpoch.toString();
 
+      // 🔬 Micro-fix: Explicitly set ContentType to image/jpeg for proper CDN/Web rendering
+      final fileOptions =
+          const FileOptions(contentType: 'image/jpeg', upsert: true);
+
       if (_frontImage != null) {
-        String path = 'farmers_docs/${_phoneCtrl.text}_front_$time.jpg';
-        try {
-          await _supabase.storage
-              .from('verification_docs')
-              .upload(path, _frontImage!);
-          frontUrl =
-              _supabase.storage.from('verification_docs').getPublicUrl(path);
-        } catch (_) {}
-      }
-      if (_backImage != null) {
-        String path = 'farmers_docs/${_phoneCtrl.text}_back_$time.jpg';
-        try {
-          await _supabase.storage
-              .from('verification_docs')
-              .upload(path, _backImage!);
-          backUrl =
-              _supabase.storage.from('verification_docs').getPublicUrl(path);
-        } catch (_) {}
+        String path = 'farmers_docs/${newFarmerId}_front_$time.jpg';
+        await _supabase.storage
+            .from('verification_docs')
+            .upload(path, _frontImage!, fileOptions: fileOptions)
+            .timeout(const Duration(seconds: 45));
+        uploadedPaths.add(path);
+        frontUrl =
+            _supabase.storage.from('verification_docs').getPublicUrl(path);
       }
 
-      // 3. Insert Data
-      final newFarmerId = const Uuid().v4();
+      if (_backImage != null) {
+        String path = 'farmers_docs/${newFarmerId}_back_$time.jpg';
+        await _supabase.storage
+            .from('verification_docs')
+            .upload(path, _backImage!, fileOptions: fileOptions)
+            .timeout(const Duration(seconds: 45));
+        uploadedPaths.add(path);
+        backUrl =
+            _supabase.storage.from('verification_docs').getPublicUrl(path);
+      }
+
+      String? cleanAadhar =
+          _extractedAadharNumber?.replaceAll(RegExp(r'\s+'), '');
+      if (cleanAadhar != null && cleanAadhar.isEmpty) cleanAadhar = null;
+
+      // 🔬 Micro-fix: Sanitize empty strings to SQL NULLs
+      String mName = _middleNameCtrl.text.trim();
+      String bName = _bankNameCtrl.text.trim();
+      String bAcc = _bankAccCtrl.text.trim();
+      String bIfsc = _bankIfscCtrl.text.trim().toUpperCase();
 
       final Map<String, dynamic> farmerData = {
         'id': newFarmerId,
         'role': 'farmer',
         'first_name': _firstNameCtrl.text.trim(),
-        'middle_name': _middleNameCtrl.text.trim(),
+        'middle_name': mName.isEmpty ? null : mName,
         'last_name': _lastNameCtrl.text.trim(),
         'phone': _phoneCtrl.text.trim(),
         'land_size': _farmSize,
@@ -272,12 +326,12 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
         'village': _selectedVillageId,
 
         // Bank Details
-        'bank_account_no': _bankAccCtrl.text.trim(),
-        'ifsc_code': _bankIfscCtrl.text.trim().toUpperCase(),
-        'bank_name': _bankNameCtrl.text.trim(),
+        'bank_account_no': bAcc.isEmpty ? null : bAcc,
+        'ifsc_code': bIfsc.isEmpty ? null : bIfsc,
+        'bank_name': bName.isEmpty ? null : bName,
 
         // ID Details
-        'aadhar_number': _extractedAadharNumber ?? "MANUAL-VERIFIED",
+        'aadhar_number': cleanAadhar,
         'aadhar_front_url': frontUrl,
         'aadhar_back_url': backUrl,
 
@@ -288,7 +342,10 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
         'inspector_id': inspector.id,
       };
 
-      await _supabase.from('profiles').insert(farmerData);
+      await _supabase
+          .from('profiles')
+          .insert(farmerData)
+          .timeout(const Duration(seconds: 15));
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
@@ -297,183 +354,209 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
         Navigator.pop(context, true);
       }
     } catch (e) {
+      if (uploadedPaths.isNotEmpty) {
+        try {
+          await _supabase.storage
+              .from('verification_docs')
+              .remove(uploadedPaths);
+        } catch (_) {}
+      }
+
       if (mounted) {
+        String errorMsg = e.toString();
+        if (errorMsg.contains("Exception:")) {
+          errorMsg = errorMsg.split('Exception:').last.trim();
+        }
+        if (e is TimeoutException) {
+          errorMsg = "Connection timed out. Please try again.";
+        }
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text("Error: ${e.toString().split(']').last}"),
-            backgroundColor: Colors.red));
+            content: Text("Error: $errorMsg"), backgroundColor: Colors.red));
       }
     } finally {
-      if (mounted) setState(() => _isLoading = false);
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _isSubmitting = false;
+        });
+      }
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFFF3E5F5),
-      appBar: AppBar(
-        title: const Text("Register New Farmer"),
-        backgroundColor: _inspectorColor,
-        foregroundColor: Colors.white,
-        elevation: 0,
-      ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(20),
-        child: Form(
-          key: _formKey,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // --- 1. PERSONAL INFO ---
-              _sectionHeader("Personal Details"),
-              _buildTextField("First Name *", _firstNameCtrl, Icons.person),
-              const SizedBox(height: 15),
-              _buildTextField(
-                  "Middle Name", _middleNameCtrl, Icons.person_outline,
-                  required: false),
-              const SizedBox(height: 15),
-              _buildTextField(
-                  "Last Name *", _lastNameCtrl, Icons.person_outline),
-              const SizedBox(height: 15),
-              _buildTextField("Mobile Number *", _phoneCtrl, Icons.phone,
-                  isNumber: true, maxLength: 10),
+    return GestureDetector(
+      onTap: () => FocusScope.of(context).unfocus(),
+      child: Scaffold(
+        backgroundColor: const Color(0xFFF3E5F5),
+        appBar: AppBar(
+          title: const Text("Register New Farmer"),
+          backgroundColor: _inspectorColor,
+          foregroundColor: Colors.white,
+          elevation: 0,
+        ),
+        body: SingleChildScrollView(
+          padding: const EdgeInsets.all(20),
+          child: Form(
+            key: _formKey,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // --- 1. PERSONAL INFO ---
+                _sectionHeader("Personal Details"),
+                _buildTextField("First Name *", _firstNameCtrl, Icons.person),
+                const SizedBox(height: 15),
+                _buildTextField(
+                    "Middle Name", _middleNameCtrl, Icons.person_outline,
+                    required: false),
+                const SizedBox(height: 15),
+                _buildTextField(
+                    "Last Name *", _lastNameCtrl, Icons.person_outline),
+                const SizedBox(height: 15),
+                _buildTextField("Mobile Number *", _phoneCtrl, Icons.phone,
+                    isNumber: true, maxLength: 10),
 
-              const SizedBox(height: 25),
+                const SizedBox(height: 25),
 
-              // --- 2. ID VERIFICATION ---
-              _sectionHeader("Identity Verification (Aadhar)"),
-              Row(
-                children: [
-                  Expanded(
-                      child: _buildIdCard("Front Side", _frontImage, _frontMsg,
-                          _isFrontValid, true)),
-                  const SizedBox(width: 10),
-                  Expanded(
-                      child: _buildIdCard("Back Side", _backImage, _backMsg,
-                          _isBackValid, false)),
-                ],
-              ),
-              if (_extractedAadharNumber != null)
-                Padding(
-                  padding: const EdgeInsets.only(top: 8.0),
-                  child: Text("Detected ID: $_extractedAadharNumber",
-                      style: const TextStyle(
-                          fontWeight: FontWeight.bold, color: Colors.green)),
+                // --- 2. ID VERIFICATION ---
+                _sectionHeader("Identity Verification (Aadhar)"),
+                Row(
+                  children: [
+                    Expanded(
+                        child: _buildIdCard("Front Side", _frontImage,
+                            _frontMsg, _isFrontValid, true)),
+                    const SizedBox(width: 10),
+                    Expanded(
+                        child: _buildIdCard("Back Side", _backImage, _backMsg,
+                            _isBackValid, false)),
+                  ],
+                ),
+                if (_extractedAadharNumber != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8.0),
+                    child: Text("Detected ID: $_extractedAadharNumber",
+                        style: const TextStyle(
+                            fontWeight: FontWeight.bold, color: Colors.green)),
+                  ),
+
+                const SizedBox(height: 25),
+
+                // --- 3. FARM INFO ---
+                _sectionHeader("Farming Details"),
+                DropdownButtonFormField<String>(
+                  value: _farmSize,
+                  decoration: _inputDecoration("Farm Size *", Icons.landscape),
+                  items: _farmSizeOptions
+                      .map((e) => DropdownMenuItem(value: e, child: Text(e)))
+                      .toList(),
+                  onChanged: (v) => setState(() => _farmSize = v),
+                  validator: (v) => v == null ? "Required" : null,
                 ),
 
-              const SizedBox(height: 25),
+                const SizedBox(height: 25),
 
-              // --- 3. FARM INFO ---
-              _sectionHeader("Farming Details"),
-              DropdownButtonFormField<String>(
-                value: _farmSize,
-                decoration: _inputDecoration("Farm Size *", Icons.landscape),
-                items: _farmSizeOptions
-                    .map((e) => DropdownMenuItem(value: e, child: Text(e)))
-                    .toList(),
-                onChanged: (v) => setState(() => _farmSize = v),
-                validator: (v) => v == null ? "Required" : null,
-              ),
-
-              const SizedBox(height: 25),
-
-              // --- 4. LOCATION ---
-              _sectionHeader("Location"),
-              _locationDropdown("State *", _selectedStateId, _stateList, (val) {
-                setState(() {
-                  _selectedStateId = val;
-                  _districtList = LocationService.getDistricts(val!);
-                  _selectedDistrictId = null;
-                  _talukaList = [];
-                  _villageList = [];
-                });
-              }),
-              const SizedBox(height: 15),
-              _locationDropdown(
-                  "District *", _selectedDistrictId, _districtList, (val) {
-                setState(() {
-                  _selectedDistrictId = val;
-                  _talukaList =
-                      LocationService.getTalukas(_selectedStateId!, val!);
-                  _selectedTalukaId = null;
-                  _villageList = [];
-                });
-              }),
-              const SizedBox(height: 15),
-              Row(
-                children: [
-                  Expanded(
-                    child: _locationDropdown(
-                        "Taluka", _selectedTalukaId, _talukaList, (val) {
-                      setState(() {
-                        _selectedTalukaId = val;
-                        _villageList = LocationService.getVillages(
-                            _selectedStateId!, _selectedDistrictId!, val!);
-                        _selectedVillageId = null;
-                      });
-                    }),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: _locationDropdown(
-                        "Village", _selectedVillageId, _villageList, (val) {
-                      setState(() => _selectedVillageId = val);
-                    }),
-                  ),
-                ],
-              ),
-
-              const SizedBox(height: 25),
-
-              // --- 5. ADDRESS ---
-              _sectionHeader("Address"),
-              _buildTextField("Address / Landmark *", _addr1Ctrl, Icons.home),
-              const SizedBox(height: 15),
-              _buildTextField("Pincode *", _pinCtrl, Icons.pin_drop,
-                  isNumber: true, maxLength: 6),
-
-              const SizedBox(height: 25),
-
-              // --- 6. BANK DETAILS ---
-              _sectionHeader("Bank Details"),
-              _buildTextField("Bank Name", _bankNameCtrl, Icons.account_balance,
-                  required: false),
-              const SizedBox(height: 15),
-              _buildTextField("Account Number", _bankAccCtrl, Icons.numbers,
-                  isNumber: true, required: false),
-              const SizedBox(height: 15),
-              _buildTextField("IFSC Code", _bankIfscCtrl, Icons.qr_code,
-                  required: false),
-
-              const SizedBox(height: 40),
-
-              // --- SUBMIT ---
-              SizedBox(
-                width: double.infinity,
-                height: 55,
-                child: ElevatedButton(
-                  onPressed: _isLoading ? null : _registerFarmer,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: _inspectorColor,
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12)),
-                    elevation: 4,
-                  ),
-                  child: _isLoading
-                      ? const SizedBox(
-                          height: 24,
-                          width: 24,
-                          child: CircularProgressIndicator(
-                              color: Colors.white, strokeWidth: 2))
-                      : const Text("Create Farmer Account",
-                          style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.white)),
+                // --- 4. LOCATION ---
+                _sectionHeader("Location"),
+                _locationDropdown("State *", _selectedStateId, _stateList,
+                    (val) {
+                  setState(() {
+                    _selectedStateId = val;
+                    _districtList = LocationService.getDistricts(val!);
+                    _selectedDistrictId = null;
+                    _talukaList = [];
+                    _villageList = [];
+                  });
+                }),
+                const SizedBox(height: 15),
+                _locationDropdown(
+                    "District *", _selectedDistrictId, _districtList, (val) {
+                  setState(() {
+                    _selectedDistrictId = val;
+                    _talukaList =
+                        LocationService.getTalukas(_selectedStateId!, val!);
+                    _selectedTalukaId = null;
+                    _villageList = [];
+                  });
+                }),
+                const SizedBox(height: 15),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _locationDropdown(
+                          "Taluka", _selectedTalukaId, _talukaList, (val) {
+                        setState(() {
+                          _selectedTalukaId = val;
+                          _villageList = LocationService.getVillages(
+                              _selectedStateId!, _selectedDistrictId!, val!);
+                          _selectedVillageId = null;
+                        });
+                      }),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: _locationDropdown(
+                          "Village", _selectedVillageId, _villageList, (val) {
+                        setState(() => _selectedVillageId = val);
+                      }),
+                    ),
+                  ],
                 ),
-              ),
-              const SizedBox(height: 30),
-            ],
+
+                const SizedBox(height: 25),
+
+                // --- 5. ADDRESS ---
+                _sectionHeader("Address"),
+                _buildTextField("Address / Landmark *", _addr1Ctrl, Icons.home),
+                const SizedBox(height: 15),
+                _buildTextField("Pincode *", _pinCtrl, Icons.pin_drop,
+                    isNumber: true, maxLength: 6),
+
+                const SizedBox(height: 25),
+
+                // --- 6. BANK DETAILS ---
+                _sectionHeader("Bank Details"),
+                _buildTextField(
+                    "Bank Name", _bankNameCtrl, Icons.account_balance,
+                    required: false),
+                const SizedBox(height: 15),
+                _buildTextField("Account Number", _bankAccCtrl, Icons.numbers,
+                    isNumber: true, required: false),
+                const SizedBox(height: 15),
+                _buildTextField("IFSC Code", _bankIfscCtrl, Icons.qr_code,
+                    required: false),
+
+                const SizedBox(height: 40),
+
+                // --- SUBMIT ---
+                SizedBox(
+                  width: double.infinity,
+                  height: 55,
+                  child: ElevatedButton(
+                    onPressed: _isLoading || _isProcessingImage || _isSubmitting
+                        ? null
+                        : _registerFarmer,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: _inspectorColor,
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12)),
+                      elevation: 4,
+                    ),
+                    child: _isLoading
+                        ? const SizedBox(
+                            height: 24,
+                            width: 24,
+                            child: CircularProgressIndicator(
+                                color: Colors.white, strokeWidth: 2))
+                        : const Text("Create Farmer Account",
+                            style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.white)),
+                  ),
+                ),
+                const SizedBox(height: 30),
+              ],
+            ),
           ),
         ),
       ),
@@ -505,9 +588,19 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
       controller: controller,
       keyboardType: isNumber ? TextInputType.number : TextInputType.text,
       maxLength: maxLength,
-      validator: (value) => required && (value == null || value.trim().isEmpty)
-          ? "$label is required"
-          : null,
+      inputFormatters: isNumber ? [FilteringTextInputFormatter.digitsOnly] : [],
+      validator: (value) {
+        if (required && (value == null || value.trim().isEmpty)) {
+          return "$label is required";
+        }
+        if (isNumber &&
+            maxLength != null &&
+            value != null &&
+            value.trim().length != maxLength) {
+          return "Must be exactly $maxLength digits";
+        }
+        return null;
+      },
       decoration: _inputDecoration(label, icon).copyWith(counterText: ""),
     );
   }
@@ -600,50 +693,15 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
 }
 
 // -----------------------------------------------------------------------------
-// 📍 LOCATION SERVICE & MODEL
-// (Included here to ensure the file compiles without external dependencies)
+// 📍 FORMATTER HELPERS
 // -----------------------------------------------------------------------------
-
-class LocalizedItem {
-  final String id;
-  final String nameEn;
-  LocalizedItem(this.id, this.nameEn);
-}
-
-class LocationService {
-  static List<LocalizedItem> getStates() {
-    return [
-      LocalizedItem("MH", "Maharashtra"),
-      LocalizedItem("GJ", "Gujarat"),
-      LocalizedItem("KA", "Karnataka"),
-      LocalizedItem("MP", "Madhya Pradesh"),
-    ];
-  }
-
-  static List<LocalizedItem> getDistricts(String stateId) {
-    if (stateId == "MH") {
-      return [
-        LocalizedItem("PUN", "Pune"),
-        LocalizedItem("NAG", "Nagpur"),
-        LocalizedItem("NAS", "Nashik"),
-        LocalizedItem("AUR", "Aurangabad"),
-      ];
-    }
-    return [LocalizedItem("OTHER", "Other District")];
-  }
-
-  static List<LocalizedItem> getTalukas(String stateId, String distId) {
-    return [
-      LocalizedItem("T1", "Taluka 1"),
-      LocalizedItem("T2", "Taluka 2"),
-    ];
-  }
-
-  static List<LocalizedItem> getVillages(
-      String stateId, String distId, String talukaId) {
-    return [
-      LocalizedItem("V1", "Village A"),
-      LocalizedItem("V2", "Village B"),
-    ];
+class UpperCaseTextFormatter extends TextInputFormatter {
+  @override
+  TextEditingValue formatEditUpdate(
+      TextEditingValue oldValue, TextEditingValue newValue) {
+    return TextEditingValue(
+      text: newValue.text.toUpperCase(),
+      selection: newValue.selection,
+    );
   }
 }

@@ -1,9 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:google_fonts/google_fonts.dart'; // ✅ Added typography
-import 'package:agriyukt_app/features/common/screens/change_password_screen.dart';
+import 'package:google_fonts/google_fonts.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
+
 import 'package:agriyukt_app/features/common/screens/support_screens.dart';
-import 'package:agriyukt_app/features/common/screens/legal_screens.dart';
 import 'package:agriyukt_app/features/common/screens/support_chat_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -22,59 +23,159 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   final _supabase = Supabase.instance.client;
-
-  // Notification Toggles
-  bool _notifyCrops = true;
-  bool _notifyOrders = true;
-  bool _notifyInspector = true;
-  bool _isLoading = false;
+  bool _isLoading = true;
+  bool _pushNotifications = true;
 
   @override
   void initState() {
     super.initState();
-    _loadSettings();
+    _syncSettingsWithCloud();
   }
 
-  // Simulate loading settings from DB/Local Storage
-  Future<void> _loadSettings() async {
-    // In a real app, fetch from SharedPreferences or Supabase 'user_settings' table
-    await Future.delayed(const Duration(milliseconds: 500));
-    if (mounted) {
-      setState(() {
-        // Mock data
-        _notifyCrops = true;
-        _notifyOrders = true;
-        _notifyInspector = false;
-      });
-    }
-  }
-
-  Future<void> _toggleSetting(String key, bool value) async {
-    setState(() {
-      if (key == 'crops') _notifyCrops = value;
-      if (key == 'orders') _notifyOrders = value;
-      if (key == 'inspector') _notifyInspector = value;
-    });
-
-    // Simulate API call to save preference
+  // 🚀 Dual-Sync (Local + Cloud)
+  Future<void> _syncSettingsWithCloud() async {
     try {
       final user = _supabase.auth.currentUser;
       if (user != null) {
-        // await _supabase.from('settings').upsert(...);
+        final response = await _supabase
+            .from('profiles')
+            .select('push_notifications')
+            .eq('id', user.id)
+            .maybeSingle();
+
+        if (response != null && response['push_notifications'] != null) {
+          _pushNotifications = response['push_notifications'] as bool;
+        } else {
+          final prefs = await SharedPreferences.getInstance();
+          _pushNotifications = prefs.getBool('notif_push') ?? true;
+        }
       }
-      debugPrint("Updated $key to $value");
     } catch (e) {
-      debugPrint("Error saving setting: $e");
+      debugPrint("DB Sync Error: $e");
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
     }
+  }
+
+  // 🚀 Save to Device AND Database
+  Future<void> _toggleNotif(bool value) async {
+    setState(() => _pushNotifications = value);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('notif_push', value);
+
+      final user = _supabase.auth.currentUser;
+      if (user != null) {
+        await _supabase
+            .from('profiles')
+            .update({'push_notifications': value}).eq('id', user.id);
+      }
+    } catch (e) {
+      debugPrint("Cloud Sync Error: $e");
+      setState(() => _pushNotifications = !value);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text("Failed to sync preference.",
+                style: GoogleFonts.poppins()),
+            backgroundColor: Colors.red.shade700));
+      }
+    }
+  }
+
+  // 🚀 Web Launcher
+  Future<void> _launchWeb(String url) async {
+    final Uri uri = Uri.parse(url);
+    if (await canLaunchUrl(uri)) {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } else {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content:
+                Text("Unable to open browser.", style: GoogleFonts.poppins()),
+            backgroundColor: Colors.red.shade700));
+      }
+    }
+  }
+
+  // 🚀 PRODUCTION FIX: Safe Dialog Closure & Navigation
+  void _showConfirm(String title, String msg, Color btnColor,
+      Future<void> Function() onConfirm) {
+    showDialog(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(20)),
+              title: Text(title,
+                  style: GoogleFonts.poppins(
+                      fontWeight: FontWeight.bold, color: btnColor)),
+              content: Text(msg, style: GoogleFonts.poppins(fontSize: 14)),
+              actions: [
+                TextButton(
+                    onPressed: () => Navigator.pop(dialogContext),
+                    child: Text("Cancel",
+                        style: GoogleFonts.poppins(
+                            color: Colors.grey.shade700,
+                            fontWeight: FontWeight.bold))),
+                ElevatedButton(
+                    onPressed: () async {
+                      Navigator.pop(
+                          dialogContext); // 🚀 Close dialog FIRST to prevent black screen memory leak
+                      setState(() => _isLoading = true);
+                      await onConfirm();
+                    },
+                    style: ElevatedButton.styleFrom(
+                        backgroundColor: btnColor, elevation: 0),
+                    child: Text("Confirm",
+                        style: GoogleFonts.poppins(
+                            color: Colors.white, fontWeight: FontWeight.bold))),
+              ],
+            ));
+  }
+
+  void _handleLogout() {
+    _showConfirm("Log Out", "Are you sure you want to log out of AgriYukt?",
+        widget.themeColor, () async {
+      await _supabase.auth.signOut();
+      if (mounted) {
+        Navigator.pushNamedAndRemoveUntil(context, '/login', (route) => false);
+      }
+    });
+  }
+
+  void _handleDelete() {
+    _showConfirm(
+        "Delete Account",
+        "This will permanently erase your profile, crops, and data from our servers. This cannot be undone.",
+        Colors.red.shade700, () async {
+      try {
+        final user = _supabase.auth.currentUser;
+        if (user != null) {
+          await _supabase.from('profiles').delete().eq('id', user.id);
+          await _supabase.auth.signOut();
+          if (mounted)
+            Navigator.pushNamedAndRemoveUntil(
+                context, '/login', (route) => false);
+        }
+      } catch (e) {
+        if (mounted) {
+          setState(() => _isLoading = false);
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: Text("Error deleting account. Contact support.",
+                  style: GoogleFonts.poppins()),
+              backgroundColor: Colors.red.shade700));
+        }
+      }
+    });
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFF4F6F8), // Matches App Theme
+      backgroundColor: const Color(0xFFF8F9FA),
       appBar: AppBar(
         title: Text("Settings",
-            style: GoogleFonts.poppins(fontWeight: FontWeight.bold)),
+            style:
+                GoogleFonts.poppins(fontWeight: FontWeight.bold, fontSize: 18)),
         backgroundColor: widget.themeColor,
         foregroundColor: Colors.white,
         elevation: 0,
@@ -83,245 +184,153 @@ class _SettingsScreenState extends State<SettingsScreen> {
       body: _isLoading
           ? Center(child: CircularProgressIndicator(color: widget.themeColor))
           : ListView(
-              padding: const EdgeInsets.all(20),
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+              physics: const BouncingScrollPhysics(),
               children: [
                 // --- 1. PREFERENCES ---
-                _sectionHeader("Notifications & Preferences"),
-                _buildContainer([
-                  ListTile(
-                    leading: _buildIcon(Icons.language),
-                    title: Text("Language",
+                _sectionTitle("PREFERENCES"),
+                _settingsContainer([
+                  SwitchListTile(
+                    value: _pushNotifications,
+                    onChanged: _toggleNotif,
+                    activeColor: widget.themeColor,
+                    title: Text("Push Notifications",
                         style: GoogleFonts.poppins(
                             fontWeight: FontWeight.w600, fontSize: 15)),
-                    trailing: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text("English",
-                            style: GoogleFonts.poppins(
-                                color: Colors.grey, fontSize: 13)),
-                        const SizedBox(width: 8),
-                        const Icon(Icons.chevron_right,
-                            color: Colors.grey, size: 20),
-                      ],
-                    ),
-                    onTap: () {
-                      // Future: Show Language Dialog
-                    },
+                    subtitle: Text("Receive updates on prices and orders",
+                        style: GoogleFonts.poppins(
+                            fontSize: 12, color: Colors.grey.shade600)),
                   ),
-                  Divider(height: 1, color: Colors.grey.withOpacity(0.1)),
-
-                  // NOTIFICATION TOGGLES
-                  _buildSwitchTile(
-                      "Crop Alerts",
-                      "Get price updates & weather info",
-                      _notifyCrops,
-                      (v) => _toggleSetting('crops', v)),
-                  Divider(height: 1, color: Colors.grey.withOpacity(0.1)),
-                  _buildSwitchTile(
-                      "Order Updates",
-                      "Receive alerts for new orders & status",
-                      _notifyOrders,
-                      (v) => _toggleSetting('orders', v)),
-                  Divider(height: 1, color: Colors.grey.withOpacity(0.1)),
-                  _buildSwitchTile(
-                      "Inspector Visits",
-                      "Notify when an inspector is assigned",
-                      _notifyInspector,
-                      (v) => _toggleSetting('inspector', v)),
                 ]),
+                const SizedBox(height: 28),
 
-                const SizedBox(height: 24),
-
-                // --- 2. SECURITY & PRIVACY ---
-                _sectionHeader("Security & Privacy"),
-                _buildContainer([
-                  _buildListTile(Icons.lock_outline, "Change Password", () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) =>
-                            ChangePasswordScreen(themeColor: widget.themeColor),
-                      ),
-                    );
-                  }),
-                  Divider(height: 1, color: Colors.grey.withOpacity(0.1)),
-                  _buildListTile(Icons.privacy_tip_outlined, "Privacy Policy",
+                // --- 2. SUPPORT & LEGAL ---
+                _sectionTitle("SUPPORT & LEGAL"),
+                _settingsContainer([
+                  _actionTile(Icons.chat_bubble_outline, "AI Assistant Chat",
                       () {
                     Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => StaticContentScreen(
-                          title: "Privacy Policy",
-                          content: kPrivacyPolicy,
-                          themeColor: widget.themeColor,
-                        ),
-                      ),
-                    );
-                  }),
-                  Divider(height: 1, color: Colors.grey.withOpacity(0.1)),
-                  _buildListTile(
-                      Icons.description_outlined, "Terms & Conditions", () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => StaticContentScreen(
-                          title: "Terms & Conditions",
-                          content: kTermsConditions,
-                          themeColor: widget.themeColor,
-                        ),
-                      ),
-                    );
-                  }),
-                ]),
-
-                const SizedBox(height: 24),
-
-                // --- 3. SUPPORT ---
-                _sectionHeader("Support"),
-                _buildContainer([
-                  ListTile(
-                    leading: _buildIcon(Icons.chat_bubble_outline),
-                    title: Text("Chatbot (AI Assistant)",
-                        style: GoogleFonts.poppins(
-                            fontWeight: FontWeight.w600, fontSize: 15)),
-                    subtitle: Text("Get instant help & FAQs",
-                        style: GoogleFonts.poppins(
-                            fontSize: 12, color: Colors.grey)),
-                    trailing: const Icon(Icons.chevron_right,
-                        color: Colors.grey, size: 20),
-                    onTap: () {
-                      Navigator.push(
                         context,
                         MaterialPageRoute(
-                          builder: (_) => SupportChatScreen(role: widget.role),
-                        ),
-                      );
-                    },
-                  ),
-                  Divider(height: 1, color: Colors.grey.withOpacity(0.1)),
-                  _buildListTile(Icons.headset_mic_outlined, "Contact Support",
+                            builder: (_) =>
+                                SupportChatScreen(role: widget.role)));
+                  }),
+                  _divider(),
+                  _actionTile(Icons.headset_mic_outlined, "Contact Support",
                       () {
                     Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) =>
-                            ContactSupportScreen(themeColor: widget.themeColor),
-                      ),
-                    );
+                        context,
+                        MaterialPageRoute(
+                            builder: (_) => ContactSupportScreen(
+                                themeColor: widget.themeColor)));
                   }),
-                  Divider(height: 1, color: Colors.grey.withOpacity(0.1)),
-                  _buildListTile(Icons.bug_report_outlined, "Report an Issue",
-                      () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) =>
-                            ReportIssueScreen(themeColor: widget.themeColor),
-                      ),
-                    );
-                  }),
+                  _divider(),
+                  _actionTile(
+                      Icons.privacy_tip_outlined,
+                      "Privacy Policy",
+                      () => _launchWeb(
+                          "https://agriyukt.github.io/agriyukt-legal/privacy.html")),
+                  _divider(),
+                  _actionTile(
+                      Icons.description_outlined,
+                      "Terms of Service",
+                      () => _launchWeb(
+                          "https://agriyukt.github.io/agriyukt-legal/terms.html")),
                 ]),
+                const SizedBox(height: 40),
 
-                const SizedBox(height: 24),
-
-                // --- 4. ABOUT ---
-                _sectionHeader("About"),
-                _buildContainer([
-                  _buildListTile(Icons.info_outline, "About App", () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => StaticContentScreen(
-                          title: "About AgriYukt",
-                          content: kAboutApp,
-                          themeColor: widget.themeColor,
-                        ),
-                      ),
-                    );
-                  }),
-                  Divider(height: 1, color: Colors.grey.withOpacity(0.1)),
-                  ListTile(
-                    leading: _buildIcon(Icons.android),
-                    title: Text("App Version",
-                        style: GoogleFonts.poppins(
-                            fontWeight: FontWeight.w600, fontSize: 15)),
-                    trailing: Text("1.0.0",
-                        style: GoogleFonts.poppins(
-                            fontWeight: FontWeight.bold,
-                            color: Colors.black54)),
-                  ),
-                ]),
+                // --- 3. DANGER ZONE ---
+                Text("DANGER ZONE",
+                    style: GoogleFonts.poppins(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.red.shade300,
+                        letterSpacing: 1.2)),
+                const SizedBox(height: 12),
+                _dangerButton(
+                    "Log Out", Icons.logout, widget.themeColor, _handleLogout),
+                const SizedBox(height: 12),
+                _dangerButton("Delete Account", Icons.delete_forever,
+                    Colors.red.shade700, _handleDelete),
 
                 const SizedBox(height: 40),
+                Center(
+                    child: Text("Version 1.0.0 (Cloud Synced)",
+                        style: GoogleFonts.poppins(
+                            fontSize: 12,
+                            color: Colors.grey.shade400,
+                            fontWeight: FontWeight.w600))),
               ],
             ),
     );
   }
 
-  // --- WIDGET HELPERS ---
+  // --- UI Helpers ---
+  Widget _sectionTitle(String text) => Padding(
+        padding: const EdgeInsets.only(left: 4, bottom: 8),
+        child: Text(text,
+            style: GoogleFonts.poppins(
+                fontSize: 12,
+                fontWeight: FontWeight.bold,
+                color: Colors.grey.shade500,
+                letterSpacing: 1)),
+      );
 
-  Widget _sectionHeader(String title) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 12, left: 4),
-      child: Text(
-        title,
-        style: GoogleFonts.poppins(
-            color: widget.themeColor,
-            fontWeight: FontWeight.bold,
-            fontSize: 16),
-      ),
-    );
-  }
+  Widget _settingsContainer(List<Widget> children) => Container(
+        decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: Colors.grey.shade200),
+            boxShadow: [
+              BoxShadow(
+                  color: Colors.black.withOpacity(0.02),
+                  blurRadius: 10,
+                  offset: const Offset(0, 4))
+            ]),
+        child: Column(children: children),
+      );
 
-  Widget _buildContainer(List<Widget> children) {
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
+  Widget _actionTile(IconData icon, String title, VoidCallback onTap) =>
+      ListTile(
+        leading: Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+                color: widget.themeColor.withOpacity(0.1),
+                shape: BoxShape.circle),
+            child: Icon(icon, color: widget.themeColor, size: 20)),
+        title: Text(title,
+            style: GoogleFonts.poppins(
+                fontWeight: FontWeight.w600,
+                fontSize: 15,
+                color: Colors.black87)),
+        trailing: const Icon(Icons.chevron_right, size: 18, color: Colors.grey),
+        onTap: onTap,
+      );
+
+  Widget _divider() =>
+      Divider(height: 1, indent: 60, color: Colors.grey.shade100);
+
+  Widget _dangerButton(
+          String label, IconData icon, Color color, VoidCallback action) =>
+      InkWell(
+        onTap: action,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.grey.withOpacity(0.1)),
-        boxShadow: [
-          BoxShadow(
-              color: Colors.grey.withOpacity(0.05),
-              blurRadius: 10,
-              offset: const Offset(0, 4))
-        ],
-      ),
-      child: Column(children: children),
-    );
-  }
-
-  Widget _buildIcon(IconData icon) {
-    return Container(
-      padding: const EdgeInsets.all(8),
-      decoration: BoxDecoration(
-          color: widget.themeColor.withOpacity(0.1), shape: BoxShape.circle),
-      child: Icon(icon, color: widget.themeColor, size: 20),
-    );
-  }
-
-  Widget _buildListTile(IconData icon, String title, VoidCallback onTap) {
-    return ListTile(
-      leading: _buildIcon(icon),
-      title: Text(title,
-          style:
-              GoogleFonts.poppins(fontWeight: FontWeight.w600, fontSize: 15)),
-      trailing: const Icon(Icons.chevron_right, color: Colors.grey, size: 20),
-      onTap: onTap,
-    );
-  }
-
-  Widget _buildSwitchTile(
-      String title, String subtitle, bool value, Function(bool) onChanged) {
-    return SwitchListTile(
-      activeColor: widget.themeColor,
-      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      title: Text(title,
-          style:
-              GoogleFonts.poppins(fontWeight: FontWeight.w600, fontSize: 15)),
-      subtitle: Text(subtitle,
-          style: GoogleFonts.poppins(fontSize: 12, color: Colors.grey)),
-      value: value,
-      onChanged: onChanged,
-    );
-  }
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 16),
+          decoration: BoxDecoration(
+              color: Colors.white,
+              border: Border.all(color: color.withOpacity(0.4)),
+              borderRadius: BorderRadius.circular(16)),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(icon, color: color, size: 20),
+              const SizedBox(width: 10),
+              Text(label,
+                  style: GoogleFonts.poppins(
+                      fontWeight: FontWeight.bold, color: color, fontSize: 15)),
+            ],
+          ),
+        ),
+      );
 }

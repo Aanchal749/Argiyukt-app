@@ -3,14 +3,14 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:provider/provider.dart'; // ✅ Added
+import 'package:provider/provider.dart';
 
 // ✅ LOCALIZATION IMPORTS
 import 'package:agriyukt_app/features/farmer/farmer_translations.dart';
 import 'package:agriyukt_app/core/providers/language_provider.dart';
 
 class AddCropScreen extends StatefulWidget {
-  final Map<String, dynamic>? cropToEdit; // If not null, we are Editing
+  final Map<String, dynamic>? cropToEdit;
 
   const AddCropScreen({super.key, this.cropToEdit});
 
@@ -27,8 +27,6 @@ class _AddCropScreenState extends State<AddCropScreen> {
   final Color _primaryGreen = const Color(0xFF1B5E20);
 
   // --- DATA LISTS ---
-  // NOTE: Keep keys in English for DB logic, but we can localize display later if needed.
-  // For now, crop names are often proper nouns, but categories can be localized.
   final Map<String, Map<String, List<String>>> _cropData = {
     'Vegetables': {
       'Tomato': [
@@ -103,7 +101,14 @@ class _AddCropScreenState extends State<AddCropScreen> {
     }
   }
 
-  // ✅ Helper for Localized Text
+  @override
+  void dispose() {
+    _qtyCtrl.dispose();
+    _priceCtrl.dispose();
+    _notesCtrl.dispose();
+    super.dispose();
+  }
+
   String _text(String key) => FarmerText.get(context, key);
 
   void _prefillData(Map<String, dynamic> c) {
@@ -142,15 +147,21 @@ class _AddCropScreenState extends State<AddCropScreen> {
     _selectedGrade =
         (dbGrade != null && _gradeOptions.contains(dbGrade)) ? dbGrade : null;
 
-    String rawQty = c['quantity'] ?? "0 Kg";
+    // Prefill Quantity logic (Safely handles both strings and numbers)
+    String rawQty = c['quantity']?.toString() ?? "0";
     List<String> qtyParts = rawQty.split(' ');
+
     if (qtyParts.length >= 2) {
       _qtyCtrl.text = qtyParts[0];
       String unit = qtyParts.sublist(1).join(' ');
-      if (["Kg", "Quintal (q)", "Ton", "Crates"].contains(unit))
+      if (["Kg", "Quintal (q)", "Ton", "Crates"].contains(unit)) {
         _selectedUnit = unit;
+      }
     } else {
-      _qtyCtrl.text = rawQty;
+      _qtyCtrl.text = rawQty.replaceAll(RegExp(r'[^0-9.]'), '');
+      if (c['unit'] != null) {
+        _selectedUnit = c['unit'];
+      }
     }
 
     _priceCtrl.text = (c['price'] ?? 0).toString();
@@ -166,8 +177,12 @@ class _AddCropScreenState extends State<AddCropScreen> {
   // --- IMAGE PICKER ---
   Future<void> _pickImage(ImageSource source) async {
     try {
-      final XFile? pickedFile =
-          await _picker.pickImage(source: source, imageQuality: 70);
+      final XFile? pickedFile = await _picker.pickImage(
+        source: source,
+        imageQuality: 70,
+        maxWidth: 1080,
+        maxHeight: 1080,
+      );
       if (pickedFile != null) {
         setState(() => _selectedImage = File(pickedFile.path));
         Navigator.pop(context);
@@ -187,7 +202,7 @@ class _AddCropScreenState extends State<AddCropScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(_text('upload_crop_photo'), // ✅ "Upload Crop Photo"
+            Text(_text('upload_crop_photo'),
                 style: GoogleFonts.poppins(
                     fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 24),
@@ -232,23 +247,21 @@ class _AddCropScreenState extends State<AddCropScreen> {
 
   // --- SUBMIT LOGIC ---
   Future<void> _submit() async {
+    if (_isLoading) return;
+
     if (_selectedCrop == null ||
-        _qtyCtrl.text.isEmpty ||
-        _priceCtrl.text.isEmpty) {
+        _qtyCtrl.text.trim().isEmpty ||
+        _priceCtrl.text.trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content:
-              Text(_text('fill_required'), // ✅ "Please fill all required..."
-                  style: GoogleFonts.poppins()),
+          content: Text(_text('fill_required'), style: GoogleFonts.poppins()),
           backgroundColor: Colors.red));
       return;
     }
 
     if (!_isEditMode && _selectedImage == null) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(
-              _text(
-                  'upload_crop_photo'), // Reusing "Upload Crop Photo" as error msg
-              style: GoogleFonts.poppins()),
+          content:
+              Text(_text('upload_crop_photo'), style: GoogleFonts.poppins()),
           backgroundColor: Colors.red));
       return;
     }
@@ -287,15 +300,18 @@ class _AddCropScreenState extends State<AddCropScreen> {
             ),
           );
         }
+        setState(() => _isLoading = false);
         return;
       }
 
       String? imageUrl = _existingImageUrl;
 
       if (_selectedImage != null) {
-        final ext = _selectedImage!.path.split('.').last;
+        final ext = _selectedImage!.path.split('.').last.toLowerCase();
+        final safeExt =
+            ['jpg', 'jpeg', 'png', 'webp'].contains(ext) ? ext : 'jpg';
         final fileName =
-            '${user.id}/${DateTime.now().millisecondsSinceEpoch}.$ext';
+            '${user.id}/${DateTime.now().millisecondsSinceEpoch}.$safeExt';
 
         await Supabase.instance.client.storage.from('crop_images').uploadBinary(
             fileName, await _selectedImage!.readAsBytes(),
@@ -303,19 +319,26 @@ class _AddCropScreenState extends State<AddCropScreen> {
         imageUrl = fileName;
       }
 
+      // Safe Data Parsing
+      final double parsedQty = double.tryParse(_qtyCtrl.text.trim()) ?? 0.0;
+      final double parsedPrice = double.tryParse(_priceCtrl.text.trim()) ?? 0.0;
+
+      // 🚨 DATABASE FIX: We now send pure numbers to numeric columns, and text to text columns.
       final Map<String, dynamic> cropData = {
         'farmer_id': user.id,
         'crop_name': _selectedCrop,
         'category': _selectedCategory,
         'variety': _selectedVariety,
         'grade': _selectedGrade,
-        'quantity': "${_qtyCtrl.text} $_selectedUnit",
-        'price': double.tryParse(_priceCtrl.text) ?? 0,
+        'quantity': parsedQty, // ✅ Fixed: Sending pure number to match your DB
+        'unit':
+            _selectedUnit, // ✅ Make sure this column is created in Supabase!
+        'price': parsedPrice,
         'crop_type': _cropType,
         'status': _status,
         'harvest_date': _harvestDate?.toIso8601String(),
         'available_from': _availableDate?.toIso8601String(),
-        'description': _notesCtrl.text,
+        'description': _notesCtrl.text.trim(),
         'image_url': imageUrl,
         if (!_isEditMode) 'created_at': DateTime.now().toIso8601String(),
       };
@@ -339,8 +362,10 @@ class _AddCropScreenState extends State<AddCropScreen> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text("Error: $e", style: GoogleFonts.poppins()),
-            backgroundColor: Colors.red));
+          content: Text("DB Error: $e", style: GoogleFonts.poppins()),
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 5),
+        ));
       }
     } finally {
       if (mounted) setState(() => _isLoading = false);
@@ -349,49 +374,50 @@ class _AddCropScreenState extends State<AddCropScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // Listen to changes
     Provider.of<LanguageProvider>(context);
 
-    return Scaffold(
-      backgroundColor: Colors.white,
-      appBar: AppBar(
-        title: Text(
-            _isEditMode ? _text('edit_crop') : _text('add_crop'), // ✅ Localized
-            style: GoogleFonts.poppins(fontWeight: FontWeight.bold)),
-        backgroundColor: _primaryGreen,
-        foregroundColor: Colors.white,
-        elevation: 0,
-        actions: [
-          if (_isEditMode && !_isLoading)
-            TextButton(
-                onPressed: _submit,
-                child: Text(_text('save'), // ✅ "SAVE"
-                    style: GoogleFonts.poppins(
-                        color: Colors.white,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 16)))
-        ],
+    return PopScope(
+      canPop: !_isLoading,
+      child: Scaffold(
+        backgroundColor: Colors.white,
+        appBar: AppBar(
+          title: Text(_isEditMode ? _text('edit_crop') : _text('add_crop'),
+              style: GoogleFonts.poppins(fontWeight: FontWeight.bold)),
+          backgroundColor: _primaryGreen,
+          foregroundColor: Colors.white,
+          elevation: 0,
+          actions: [
+            if (_isEditMode && !_isLoading)
+              TextButton(
+                  onPressed: _submit,
+                  child: Text(_text('save'),
+                      style: GoogleFonts.poppins(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16)))
+          ],
+        ),
+        body: _isLoading
+            ? Center(child: CircularProgressIndicator(color: _primaryGreen))
+            : Theme(
+                data: ThemeData(
+                  colorScheme: ColorScheme.light(primary: _primaryGreen),
+                  canvasColor: Colors.white,
+                ),
+                child: Stepper(
+                  type: StepperType.horizontal,
+                  currentStep: _currentStep,
+                  elevation: 0,
+                  controlsBuilder: (context, details) => _buildButtons(details),
+                  onStepContinue: () => _currentStep < 2
+                      ? setState(() => _currentStep++)
+                      : _submit(),
+                  onStepCancel: () =>
+                      _currentStep > 0 ? setState(() => _currentStep--) : null,
+                  steps: _getSteps(),
+                ),
+              ),
       ),
-      body: _isLoading
-          ? Center(child: CircularProgressIndicator(color: _primaryGreen))
-          : Theme(
-              data: ThemeData(
-                colorScheme: ColorScheme.light(primary: _primaryGreen),
-                canvasColor: Colors.white,
-              ),
-              child: Stepper(
-                type: StepperType.horizontal,
-                currentStep: _currentStep,
-                elevation: 0,
-                controlsBuilder: (context, details) => _buildButtons(details),
-                onStepContinue: () => _currentStep < 2
-                    ? setState(() => _currentStep++)
-                    : _submit(),
-                onStepCancel: () =>
-                    _currentStep > 0 ? setState(() => _currentStep--) : null,
-                steps: _getSteps(),
-              ),
-            ),
     );
   }
 
@@ -409,10 +435,8 @@ class _AddCropScreenState extends State<AddCropScreen> {
                     padding: const EdgeInsets.symmetric(vertical: 14)),
                 child: Text(
                     _currentStep == 2
-                        ? (_isEditMode
-                            ? _text('update_save')
-                            : _text('submit')) // ✅ Localized
-                        : _text('next'), // ✅ Localized
+                        ? (_isEditMode ? _text('update_save') : _text('submit'))
+                        : _text('next'),
                     style: GoogleFonts.poppins(
                         color: Colors.white,
                         fontSize: 16,
@@ -427,7 +451,7 @@ class _AddCropScreenState extends State<AddCropScreen> {
                       shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(12)),
                       side: const BorderSide(color: Colors.grey)),
-                  child: Text(_text('back'), // ✅ Localized
+                  child: Text(_text('back'),
                       style: GoogleFonts.poppins(
                           color: Colors.black54, fontWeight: FontWeight.bold))))
         ],
@@ -439,14 +463,13 @@ class _AddCropScreenState extends State<AddCropScreen> {
     return [
       // STEP 1: INFO
       Step(
-          title: Text(_text('info'), // ✅ "Info"
-              style: GoogleFonts.poppins(fontSize: 12)),
+          title: Text(_text('info'), style: GoogleFonts.poppins(fontSize: 12)),
           isActive: _currentStep >= 0,
           content:
               Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             const SizedBox(height: 10),
             if (_isEditMode) ...[
-              _sectionLabel(_text('status')), // ✅ "Status"
+              _sectionLabel(_text('status')),
               Container(
                 margin: const EdgeInsets.only(bottom: 20, top: 5),
                 padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -461,8 +484,7 @@ class _AddCropScreenState extends State<AddCropScreen> {
                     items: _statusOptions
                         .map((s) => DropdownMenuItem(
                             value: s,
-                            child: Text(
-                                s, // Values are hardcoded for DB matching (Active/Sold)
+                            child: Text(s,
                                 style: GoogleFonts.poppins(
                                     fontWeight: FontWeight.bold))))
                         .toList(),
@@ -471,12 +493,12 @@ class _AddCropScreenState extends State<AddCropScreen> {
                 ),
               ),
             ],
-            _sectionLabel(_text('farming_type')), // ✅ "Farming Type"
+            _sectionLabel(_text('farming_type')),
             const SizedBox(height: 10),
             Row(children: [
-              _typeBtn(_text('organic'), Colors.green), // ✅ "Organic"
+              _typeBtn(_text('organic'), Colors.green),
               const SizedBox(width: 12),
-              _typeBtn(_text('inorganic'), Colors.orange) // ✅ "Inorganic"
+              _typeBtn(_text('inorganic'), Colors.orange)
             ]),
             const SizedBox(height: 20),
             _dropdown("${_text('category')} *", _selectedCategory,
@@ -489,7 +511,7 @@ class _AddCropScreenState extends State<AddCropScreen> {
             }),
             const SizedBox(height: 16),
             _dropdown(
-                "${_text('crop_name')} *", // ✅ "Crop Name"
+                "${_text('crop_name')} *",
                 _selectedCrop,
                 (_selectedCategory != null &&
                         _cropData.containsKey(_selectedCategory))
@@ -502,40 +524,34 @@ class _AddCropScreenState extends State<AddCropScreen> {
             }),
             const SizedBox(height: 16),
             _dropdown(
-                _text('variety'), // ✅ "Variety"
+                _text('variety'),
                 _selectedVariety,
                 (_selectedCategory != null && _selectedCrop != null)
                     ? _cropData[_selectedCategory]![_selectedCrop]!
                     : [],
                 (val) => setState(() => _selectedVariety = val)),
             const SizedBox(height: 16),
-            _dropdown(
-                _text('grade'),
-                _selectedGrade,
-                _gradeOptions, // ✅ "Grade"
+            _dropdown(_text('grade'), _selectedGrade, _gradeOptions,
                 (v) => setState(() => _selectedGrade = v)),
           ])),
 
       // STEP 2: PRICE
       Step(
-          title: Text(_text('price'), // ✅ "Price"
-              style: GoogleFonts.poppins(fontSize: 12)),
+          title: Text(_text('price'), style: GoogleFonts.poppins(fontSize: 12)),
           isActive: _currentStep >= 1,
           content: Column(children: [
             const SizedBox(height: 10),
-            _inputField("${_text('quantity_avail')} *",
-                _qtyCtrl, // ✅ "Quantity Available"
-                type: TextInputType.number),
+            _inputField("${_text('quantity_avail')} *", _qtyCtrl,
+                type: const TextInputType.numberWithOptions(decimal: true)),
             const SizedBox(height: 16),
             _dropdown(
-                _text('unit'), // ✅ "Unit"
+                _text('unit'),
                 _selectedUnit,
                 ["Quintal (q)", "Kg", "Ton", "Crates"],
                 (v) => setState(() => _selectedUnit = v)),
             const SizedBox(height: 16),
-            _inputField("${_text('price_per_unit')} (₹) *",
-                _priceCtrl, // ✅ "Price per Unit"
-                type: TextInputType.number,
+            _inputField("${_text('price_per_unit')} (₹) *", _priceCtrl,
+                type: const TextInputType.numberWithOptions(decimal: true),
                 prefix: "₹"),
             const SizedBox(height: 20),
             if (_priceCtrl.text.isNotEmpty && _qtyCtrl.text.isNotEmpty)
@@ -550,7 +566,7 @@ class _AddCropScreenState extends State<AddCropScreen> {
                   const SizedBox(width: 10),
                   Flexible(
                       child: Text(
-                          "${_text('total')}: ₹${(double.tryParse(_qtyCtrl.text) ?? 0 * (double.tryParse(_priceCtrl.text) ?? 0)).toStringAsFixed(0)}", // ✅ "Total"
+                          "${_text('total')}: ₹${((double.tryParse(_qtyCtrl.text) ?? 0) * (double.tryParse(_priceCtrl.text) ?? 0)).toStringAsFixed(0)}",
                           style: GoogleFonts.poppins(
                               fontWeight: FontWeight.bold,
                               color: Colors.green[800],
@@ -562,26 +578,21 @@ class _AddCropScreenState extends State<AddCropScreen> {
 
       // STEP 3: PHOTO
       Step(
-          title: Text(_text('pic'), // ✅ "Pic" or "Photo"
-              style: GoogleFonts.poppins(fontSize: 12)),
+          title: Text(_text('pic'), style: GoogleFonts.poppins(fontSize: 12)),
           isActive: _currentStep >= 2,
           content: Column(children: [
             const SizedBox(height: 10),
-            _dateBtn(
-                _text('harvest_date'),
-                _harvestDate, // ✅ "Harvest Date"
-                (d) => setState(() => _harvestDate = d)),
+            _dateBtn(_text('harvest_date'), _harvestDate,
+                (d) => setState(() => _harvestDate = d),
+                isHarvest: true),
             const SizedBox(height: 16),
-            _dateBtn(
-                _text('avail_from'),
-                _availableDate, // ✅ "Available From"
-                (d) => setState(() => _availableDate = d)),
+            _dateBtn(_text('avail_from'), _availableDate,
+                (d) => setState(() => _availableDate = d),
+                isHarvest: false),
             const SizedBox(height: 16),
 
-            // ✅ FIX: Removed unnecessary `max: 2` argument. `maxLines` is a named argument.
-            _inputField(_text('notes'), _notesCtrl, // ✅ "Notes"
-                type: TextInputType.text,
-                maxLines: 2),
+            _inputField(_text('notes'), _notesCtrl,
+                type: TextInputType.text, maxLines: 2),
 
             const SizedBox(height: 20),
 
@@ -625,9 +636,7 @@ class _AddCropScreenState extends State<AddCropScreen> {
                               const Icon(Icons.add_a_photo,
                                   size: 40, color: Colors.grey),
                               const SizedBox(height: 8),
-                              Text(
-                                  _text(
-                                      'tap_to_add_photo'), // ✅ "Tap to add photo"
+                              Text(_text('tap_to_add_photo'),
                                   style: GoogleFonts.poppins(
                                       color: Colors.grey,
                                       fontWeight: FontWeight.bold))
@@ -682,7 +691,6 @@ class _AddCropScreenState extends State<AddCropScreen> {
                 const EdgeInsets.symmetric(horizontal: 16, vertical: 16)));
   }
 
-  // ✅ FIX: `maxLines` is a named argument, NOT positional
   Widget _inputField(String l, TextEditingController ctrl,
           {TextInputType type = TextInputType.text,
           int maxLines = 1,
@@ -702,29 +710,33 @@ class _AddCropScreenState extends State<AddCropScreen> {
               filled: true,
               fillColor: const Color(0xFFF9FAFB)));
 
-  Widget _dateBtn(String l, DateTime? d, Function(DateTime) op) => InkWell(
-      onTap: () async {
-        final p = await showDatePicker(
-            context: context,
-            initialDate: DateTime.now(),
-            firstDate: DateTime.now(),
-            lastDate: DateTime(2030));
-        if (p != null) op(p);
-      },
-      child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 16),
-          decoration: BoxDecoration(
-              border: Border.all(color: Colors.grey.shade400),
-              borderRadius: BorderRadius.circular(12),
-              color: const Color(0xFFF9FAFB)),
-          child:
-              Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-            Text(d == null ? l : "${d.day}/${d.month}/${d.year}",
-                style: GoogleFonts.poppins(
-                    color: d == null ? Colors.grey[700] : Colors.black,
-                    fontSize: 16)),
-            const Icon(Icons.calendar_today, size: 20, color: Colors.green)
-          ])));
+  Widget _dateBtn(String l, DateTime? d, Function(DateTime) op,
+          {bool isHarvest = false}) =>
+      InkWell(
+          onTap: () async {
+            final p = await showDatePicker(
+                context: context,
+                initialDate: d ?? DateTime.now(),
+                firstDate: isHarvest ? DateTime(2020) : DateTime.now(),
+                lastDate: DateTime(2030));
+            if (p != null) op(p);
+          },
+          child: Container(
+              padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 16),
+              decoration: BoxDecoration(
+                  border: Border.all(color: Colors.grey.shade400),
+                  borderRadius: BorderRadius.circular(12),
+                  color: const Color(0xFFF9FAFB)),
+              child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(d == null ? l : "${d.day}/${d.month}/${d.year}",
+                        style: GoogleFonts.poppins(
+                            color: d == null ? Colors.grey[700] : Colors.black,
+                            fontSize: 16)),
+                    const Icon(Icons.calendar_today,
+                        size: 20, color: Colors.green)
+                  ])));
 
   Widget _typeBtn(String t, Color c) => Expanded(
       child: GestureDetector(

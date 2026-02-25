@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:cached_network_image/cached_network_image.dart';
+import 'package:agriyukt_app/features/farmer/farmer_translations.dart';
 
 class InspectorCropCard extends StatelessWidget {
   final String cropName;
@@ -8,203 +10,265 @@ class InspectorCropCard extends StatelessWidget {
   final String harvestDate;
   final String availableDate;
   final String imageUrl;
-  final bool isActive;
+  final String status;
+
   final VoidCallback onViewTap;
   final VoidCallback onEditTap;
   final VoidCallback onDeleteTap;
-  final ImageProvider? imageProvider; // ✅ Added for flexibility
+
+  final ImageProvider? imageProvider;
+  final String? heroTag;
+
+  // 🎨 STRICT THEME COLOR: Inspector Purple
+  final Color _inspectorColor = const Color(0xFF512DA8);
 
   const InspectorCropCard({
-    Key? key,
+    super.key,
     required this.cropName,
     required this.price,
     required this.quantity,
     required this.harvestDate,
     required this.availableDate,
     required this.imageUrl,
-    this.isActive = true,
+    required this.status,
     required this.onViewTap,
     required this.onEditTap,
     required this.onDeleteTap,
-    this.imageProvider, // Optional override
-  }) : super(key: key);
+    this.imageProvider,
+    this.heroTag,
+  });
+
+  String _text(BuildContext context, String key, {String fallback = ""}) {
+    String trans = FarmerText.get(context, key);
+    return trans == key && fallback.isNotEmpty ? fallback : trans;
+  }
+
+  // 🚀 PRODUCTION FIX: Added .trim() to prevent DB formatting errors from breaking colors
+  Color _getStatusColor(String currentStatus) {
+    switch (currentStatus.trim().toLowerCase()) {
+      case 'active':
+        return const Color(0xFF2E7D32); // Green
+      case 'sold':
+        return Colors.red.shade700; // Red
+      case 'inactive':
+        return Colors.grey.shade600; // Grey
+      case 'verified':
+        return Colors.orange.shade800; // Orange
+      default:
+        return const Color(0xFF2E7D32);
+    }
+  }
+
+  // 🚀 PRODUCTION FIX: Strict URL Validator prevents CachedNetworkImage crashes
+  bool get _isValidUrl {
+    final url = imageUrl.trim();
+    return url.isNotEmpty &&
+        (url.startsWith('http') || url.startsWith('https'));
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.06),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // --- TOP SECTION: Image & Badges ---
-          Stack(
-            children: [
-              ClipRRect(
-                borderRadius: const BorderRadius.vertical(
-                  top: Radius.circular(16),
-                ),
-                child: Container(
-                  height: 180,
-                  width: double.infinity,
-                  color: Colors.grey[200],
-                  child: _buildImage(), // ✅ Robust Image Builder
-                ),
-              ),
+    // 🚀 PRODUCTION FIX: Deterministic Hero Tag.
+    // Prevents both "Multiple heroes share the same tag" crash AND "UniqueKey Jitter" during scrolling.
+    final safeHeroTag = heroTag ??
+        (imageUrl.isNotEmpty
+            ? imageUrl
+            : "crop_${cropName}_${quantity}_${price}");
+    final statusColor = _getStatusColor(status);
 
-              // Delete Icon (Top Left)
-              Positioned(
-                top: 10,
-                left: 10,
-                child: GestureDetector(
-                  onTap: onDeleteTap,
-                  child: Container(
-                    width: 36,
-                    height: 36,
-                    decoration: const BoxDecoration(
-                      color: Colors.white,
-                      shape: BoxShape.circle,
-                      boxShadow: [
-                        BoxShadow(color: Colors.black12, blurRadius: 4),
-                      ],
-                    ),
-                    child: const Icon(
-                      Icons.delete_outline,
-                      color: Colors.red,
-                      size: 20,
-                    ),
-                  ),
-                ),
-              ),
-
-              // "ACTIVE" Badge (Top Right)
-              Positioned(
-                top: 10,
-                right: 10,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 6,
-                  ),
-                  decoration: BoxDecoration(
-                    color: isActive
-                        ? const Color(0xFF387C2B).withOpacity(0.9)
-                        : Colors.grey,
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: Text(
-                    isActive ? "ACTIVE" : "INACTIVE",
-                    style: GoogleFonts.poppins(
-                      color: Colors.white,
-                      fontSize: 10,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-
-          // --- CONTENT SECTION ---
-          Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+    return Semantics(
+      label: "Crop card for $cropName",
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 16),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.06),
+              blurRadius: 10,
+              offset: const Offset(0, 4),
+            ),
+          ],
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Stack(
               children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Expanded(
-                      child: Text(
-                        cropName,
-                        style: GoogleFonts.poppins(
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.black87,
+                Hero(
+                  tag: safeHeroTag,
+                  child: ClipRRect(
+                    borderRadius:
+                        const BorderRadius.vertical(top: Radius.circular(16)),
+                    child: Container(
+                      height: 180,
+                      width: double.infinity,
+                      color: Colors.grey[200],
+                      child: Material(
+                        color: Colors.transparent,
+                        child: InkWell(
+                          onTap: onViewTap,
+                          child: _buildImage(),
                         ),
-                        overflow: TextOverflow.ellipsis,
                       ),
                     ),
-                    Text(
-                      price,
+                  ),
+                ),
+                Positioned(
+                  top: 8,
+                  left: 8,
+                  child: Tooltip(
+                    message: _text(context, 'delete', fallback: "Delete"),
+                    child: Material(
+                      color: Colors.white,
+                      shape: const CircleBorder(),
+                      elevation: 2,
+                      shadowColor: Colors.black12,
+                      child: InkWell(
+                        onTap: onDeleteTap,
+                        customBorder: const CircleBorder(),
+                        child: Container(
+                          width: 44,
+                          height: 44,
+                          alignment: Alignment.center,
+                          child: Icon(Icons.delete_outline,
+                              color: Colors.red.shade700, size: 22),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                Positioned(
+                  top: 12,
+                  right: 12,
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                        color: statusColor.withOpacity(0.9),
+                        borderRadius: BorderRadius.circular(20),
+                        boxShadow: const [
+                          BoxShadow(
+                              color: Colors.black12,
+                              blurRadius: 4,
+                              offset: Offset(0, 2))
+                        ]),
+                    child: Text(
+                      _text(context, status.trim().toLowerCase(),
+                              fallback: status)
+                          .toUpperCase(),
                       style: GoogleFonts.poppins(
-                        fontSize: 16,
+                        color: Colors.white,
+                        fontSize: 10,
                         fontWeight: FontWeight.bold,
-                        color: const Color(0xFF387C2B),
+                        letterSpacing: 0.5,
                       ),
                     ),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                _buildInfoRow(Icons.scale, quantity),
-                const SizedBox(height: 6),
-                _buildInfoRow(Icons.agriculture, "Harvest: $harvestDate"),
-                const SizedBox(height: 6),
-                _buildInfoRow(
-                  Icons.calendar_today,
-                  "Available: $availableDate",
-                ),
-                const SizedBox(height: 16),
-                Row(
-                  children: [
-                    Expanded(
-                      child: ElevatedButton.icon(
-                        onPressed: onViewTap,
-                        icon: const Icon(
-                          Icons.visibility,
-                          size: 18,
-                          color: Colors.white,
-                        ),
-                        label: Text(
-                          "View",
-                          style: GoogleFonts.poppins(color: Colors.white),
-                        ),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF387C2B),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        onPressed: onEditTap,
-                        icon: const Icon(
-                          Icons.edit,
-                          size: 18,
-                          color: Color(0xFF387C2B),
-                        ),
-                        label: Text(
-                          "Edit",
-                          style: GoogleFonts.poppins(
-                              color: const Color(0xFF387C2B)),
-                        ),
-                        style: OutlinedButton.styleFrom(
-                          side: const BorderSide(color: Color(0xFF387C2B)),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
+                  ),
                 ),
               ],
             ),
-          ),
-        ],
+            Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Expanded(
+                        child: Text(
+                          cropName,
+                          style: GoogleFonts.poppins(
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.black87),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Flexible(
+                        child: Text(
+                          price,
+                          style: GoogleFonts.poppins(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                              color:
+                                  _inspectorColor), // ✅ Matches Inspector Purple
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  _buildInfoRow(Icons.scale, quantity, "Quantity"),
+                  const SizedBox(height: 6),
+                  _buildInfoRow(
+                      Icons.agriculture,
+                      "${_text(context, 'harvest', fallback: 'Harvest')}: $harvestDate",
+                      "Harvest Date"),
+                  const SizedBox(height: 6),
+                  _buildInfoRow(
+                      Icons.calendar_today,
+                      "${_text(context, 'available', fallback: 'Available')}: $availableDate",
+                      "Availability Date"),
+                  const SizedBox(height: 16),
+
+                  // Row 1: View & Edit Buttons
+                  Row(
+                    children: [
+                      Expanded(
+                        child: ElevatedButton.icon(
+                          onPressed: onViewTap,
+                          icon: const Icon(Icons.visibility,
+                              size: 18, color: Colors.white),
+                          label: Text(_text(context, 'view', fallback: "View"),
+                              style: GoogleFonts.poppins(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w600)),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor:
+                                _inspectorColor, // ✅ Matches Inspector Purple
+                            elevation: 0,
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(8)),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: onEditTap,
+                          icon: Icon(Icons.edit,
+                              size: 18,
+                              color:
+                                  _inspectorColor), // ✅ Matches Inspector Purple
+                          label: Text(_text(context, 'edit', fallback: "Edit"),
+                              style: GoogleFonts.poppins(
+                                  color:
+                                      _inspectorColor, // ✅ Matches Inspector Purple
+                                  fontWeight: FontWeight.w600)),
+                          style: OutlinedButton.styleFrom(
+                            side: BorderSide(
+                                color: _inspectorColor,
+                                width: 1.2), // ✅ Matches Inspector Purple
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(8)),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -212,16 +276,26 @@ class InspectorCropCard extends StatelessWidget {
   Widget _buildImage() {
     if (imageProvider != null) {
       return Image(
-        image: imageProvider!,
-        fit: BoxFit.cover,
-        errorBuilder: (context, error, stackTrace) => _placeholder(),
-      );
+          image: imageProvider!,
+          fit: BoxFit.cover,
+          errorBuilder: (context, error, stackTrace) => _placeholder());
     }
-    if (imageUrl.isNotEmpty) {
-      return Image.network(
-        imageUrl,
+    // 🚀 PRODUCTION FIX: Using safe URL validator
+    if (_isValidUrl) {
+      return CachedNetworkImage(
+        imageUrl: imageUrl.trim(),
         fit: BoxFit.cover,
-        errorBuilder: (context, error, stackTrace) => _placeholder(),
+        // 🚀 PRODUCTION FIX: Dual-axis constraints prevent Out-Of-Memory List crashes
+        memCacheHeight: 400,
+        memCacheWidth: 400,
+        placeholder: (context, url) => Container(
+            color: Colors.grey[100],
+            child: Center(
+                child: CircularProgressIndicator(
+                    color: _inspectorColor
+                        .withOpacity(0.5), // ✅ Matches Inspector Purple
+                    strokeWidth: 2))),
+        errorWidget: (context, url, error) => _placeholder(),
       );
     }
     return _placeholder();
@@ -229,34 +303,29 @@ class InspectorCropCard extends StatelessWidget {
 
   Widget _placeholder() {
     return Container(
-      height: 180,
-      color: Colors.grey[200],
-      child: const Icon(
-        Icons.grass,
-        size: 50,
-        color: Colors.grey,
-      ),
-    );
+        height: 180,
+        width: double.infinity,
+        color: Colors.grey[200],
+        child: Icon(Icons.grass, size: 50, color: Colors.grey.shade400));
   }
 
-  Widget _buildInfoRow(IconData icon, String text) {
-    return Row(
-      children: [
-        Icon(icon, size: 16, color: Colors.grey[600]),
-        const SizedBox(width: 6),
-        // ✅ Expanded prevents overflow for long text (e.g. Reserved info)
-        Expanded(
-          child: Text(
-            text,
-            style: GoogleFonts.poppins(
-              fontSize: 13,
-              color: Colors.grey[800],
-              fontWeight: FontWeight.w500,
-            ),
-            overflow: TextOverflow.ellipsis,
-          ),
-        ),
-      ],
+  Widget _buildInfoRow(IconData icon, String text, String semanticLabel) {
+    return Semantics(
+      label: "$semanticLabel: $text",
+      child: Row(
+        children: [
+          Icon(icon, size: 16, color: Colors.grey[600]),
+          const SizedBox(width: 8),
+          Expanded(
+              child: Text(text,
+                  style: GoogleFonts.poppins(
+                      fontSize: 13,
+                      color: Colors.grey[800],
+                      fontWeight: FontWeight.w500),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis)),
+        ],
+      ),
     );
   }
 }

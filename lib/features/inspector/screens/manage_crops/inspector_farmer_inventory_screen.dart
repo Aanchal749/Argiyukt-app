@@ -1,16 +1,21 @@
 import 'package:flutter/material.dart';
-import 'package:supabase_flutter/supabase_flutter.dart'; // ✅ Added Supabase
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:google_fonts/google_fonts.dart';
+
+import 'package:agriyukt_app/features/farmer/screens/view_crop_screen.dart';
+import 'package:agriyukt_app/features/farmer/screens/add_crop_tab.dart';
 import 'inspector_crop_card.dart';
+import 'inspector_edit_crop_screen.dart';
 
 class InspectorFarmerInventoryScreen extends StatefulWidget {
   final String farmerName;
-  final String farmerId; // ✅ Added ID to fetch specific farmer's data
+  final String farmerId;
 
   const InspectorFarmerInventoryScreen({
-    Key? key,
+    super.key,
     required this.farmerName,
-    required this.farmerId, // ✅ Required for DB query
-  }) : super(key: key);
+    required this.farmerId,
+  });
 
   @override
   State<InspectorFarmerInventoryScreen> createState() =>
@@ -20,246 +25,347 @@ class InspectorFarmerInventoryScreen extends StatefulWidget {
 class _InspectorFarmerInventoryScreenState
     extends State<InspectorFarmerInventoryScreen> {
   bool showActive = true;
-  final _client = Supabase.instance.client; // ✅ DB Client
+  final _client = Supabase.instance.client;
+  final TextEditingController _searchController = TextEditingController();
+  String _searchQuery = "";
+
+  // 🎨 Inspector Theme Color
+  final Color _inspectorColor = const Color(0xFF512DA8);
+
+  @override
+  void initState() {
+    super.initState();
+    _searchController.addListener(() {
+      final query = _searchController.text.trim().toLowerCase();
+      // 🚀 PRODUCTION FIX: Prevent unnecessary UI rebuilds
+      if (_searchQuery != query) {
+        setState(() {
+          _searchQuery = query;
+        });
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  // 🛡️ PRODUCTION FIX: Safe Deletion with Foreign Key checks
+  Future<void> _confirmAndDeleteCrop(Map<String, dynamic> crop) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text("Delete Crop?",
+            style: GoogleFonts.poppins(fontWeight: FontWeight.bold)),
+        content: Text(
+            "Are you sure you want to delete '${crop['crop_name'] ?? 'this crop'}'? This cannot be undone.",
+            style: GoogleFonts.poppins(fontSize: 14)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: Text("Cancel",
+                  style: GoogleFonts.poppins(
+                      color: Colors.grey.shade700,
+                      fontWeight: FontWeight.w600))),
+          ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.red.shade700,
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8))),
+              onPressed: () => Navigator.pop(context, true),
+              child: Text("Delete",
+                  style: GoogleFonts.poppins(
+                      color: Colors.white, fontWeight: FontWeight.bold))),
+        ],
+      ),
+    );
+
+    if (confirm == true) {
+      try {
+        await _client.from('crops').delete().eq('id', crop['id']);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: Text('Crop deleted successfully',
+                  style: GoogleFonts.poppins(fontWeight: FontWeight.w500)),
+              backgroundColor: Colors.green.shade700));
+        }
+      } catch (e) {
+        if (mounted) {
+          String errorMsg = 'Failed to delete crop. Check connection.';
+          if (e.toString().contains('violates foreign key') ||
+              e.toString().contains('update or delete on table')) {
+            errorMsg = 'Cannot delete: This crop is linked to active orders.';
+          }
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: Text(errorMsg,
+                  style: GoogleFonts.poppins(fontWeight: FontWeight.w500)),
+              backgroundColor: Colors.red.shade700));
+        }
+      }
+    }
+  }
+
+  double _parseQuantity(dynamic val) {
+    if (val == null) return 0.0;
+    if (val is num) return val.toDouble();
+    if (val is String) {
+      String clean = val.replaceAll(RegExp(r'[^0-9.]'), '');
+      return double.tryParse(clean) ?? 0.0;
+    }
+    return 0.0;
+  }
+
+  // 🚀 PRODUCTION FIX: Mathematically safe number formatting (No dangerous Regex)
+  String _formatNumber(double num) {
+    return num.truncateToDouble() == num
+        ? num.toInt().toString()
+        : num.toString();
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.grey[100],
       appBar: AppBar(
-        backgroundColor: const Color(0xFF387C2B), // AgriYukt Green
+        backgroundColor: _inspectorColor,
         iconTheme: const IconThemeData(color: Colors.white),
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text("Manage Crops",
-                style: TextStyle(
+            Text("Manage Crops",
+                style: GoogleFonts.poppins(
                     fontSize: 18,
                     fontWeight: FontWeight.bold,
                     color: Colors.white)),
             Text("${widget.farmerName}'s Inventory",
-                style: const TextStyle(fontSize: 12, color: Colors.white70)),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style:
+                    GoogleFonts.poppins(fontSize: 12, color: Colors.white70)),
           ],
         ),
       ),
-      body: Column(
-        children: [
-          const SizedBox(height: 16),
-
-          // --- 1. Search Bar ---
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Container(
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(12),
-                boxShadow: [
-                  BoxShadow(
-                      color: Colors.black.withOpacity(0.05),
-                      blurRadius: 5,
-                      offset: const Offset(0, 2)),
-                ],
-              ),
-              child: const TextField(
-                decoration: InputDecoration(
-                  hintText: "Search your crops...",
-                  prefixIcon: Icon(Icons.search, color: Colors.green),
-                  border: InputBorder.none,
-                  contentPadding: EdgeInsets.symmetric(vertical: 14),
+      body: GestureDetector(
+        onTap: () => FocusScope.of(context).unfocus(),
+        child: Column(
+          children: [
+            const SizedBox(height: 16),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Container(
+                decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(12),
+                    boxShadow: [
+                      BoxShadow(
+                          color: Colors.black.withOpacity(0.05),
+                          blurRadius: 5,
+                          offset: const Offset(0, 2))
+                    ]),
+                child: TextField(
+                  controller: _searchController,
+                  style:
+                      GoogleFonts.poppins(fontSize: 14, color: Colors.black87),
+                  decoration: InputDecoration(
+                    hintText: "Search your crops...",
+                    hintStyle: GoogleFonts.poppins(
+                        color: Colors.grey.shade400, fontSize: 14),
+                    prefixIcon: Icon(Icons.search, color: _inspectorColor),
+                    suffixIcon: _searchQuery.isNotEmpty
+                        ? IconButton(
+                            icon: const Icon(Icons.clear,
+                                color: Colors.grey, size: 20),
+                            onPressed: () => _searchController.clear())
+                        : null,
+                    border: InputBorder.none,
+                    contentPadding: const EdgeInsets.symmetric(vertical: 14),
+                  ),
                 ),
               ),
             ),
-          ),
-
-          const SizedBox(height: 16),
-
-          // --- 2. Custom Toggle Tabs ---
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Row(
-              children: [
-                Expanded(child: _buildTabButton("Active Crops", true)),
-                const SizedBox(width: 10),
-                Expanded(child: _buildTabButton("Inactive/Sold", false)),
-              ],
+            const SizedBox(height: 16),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Row(
+                children: [
+                  Expanded(child: _buildTabButton("Active Crops", true)),
+                  const SizedBox(width: 10),
+                  Expanded(child: _buildTabButton("Inactive/Sold", false)),
+                ],
+              ),
             ),
-          ),
+            const SizedBox(height: 16),
+            Expanded(
+              child: StreamBuilder<List<Map<String, dynamic>>>(
+                // 🚀 PRODUCTION LOGIC: Supabase Real-time Stream listens for DB changes instantly
+                stream: _client
+                    .from('crops')
+                    .stream(primaryKey: ['id'])
+                    .eq('farmer_id', widget.farmerId)
+                    .order('created_at', ascending: false),
+                builder: (context, snapshot) {
+                  if (snapshot.hasError) {
+                    return Center(
+                        child: Text("Connection interrupted. Retrying...",
+                            style: GoogleFonts.poppins(
+                                color: Colors.red.shade700)));
+                  }
+                  if (!snapshot.hasData) {
+                    return Center(
+                        child:
+                            CircularProgressIndicator(color: _inspectorColor));
+                  }
 
-          const SizedBox(height: 16),
+                  final crops = snapshot.data!;
+                  final filteredCrops = crops.where((crop) {
+                    final status = crop['status'] ?? 'Active';
+                    final double qty = _parseQuantity(crop['quantity']) +
+                        _parseQuantity(crop['quantity_kg']);
 
-          // --- 3. Crop List (STREAM BUILDER) ---
-          Expanded(
-            child: StreamBuilder<List<Map<String, dynamic>>>(
-              // ✅ Fetch crops for this specific farmer
-              stream: _client
-                  .from('crops')
-                  .stream(primaryKey: ['id'])
-                  .eq('farmer_id', widget.farmerId)
-                  .order('created_at', ascending: false),
-              builder: (context, snapshot) {
-                if (!snapshot.hasData) {
-                  return const Center(
-                      child:
-                          CircularProgressIndicator(color: Color(0xFF387C2B)));
-                }
+                    final isActiveGroup =
+                        ['Active', 'Verified', 'Growing'].contains(status) &&
+                            (qty >= 0);
+                    final matchesTab =
+                        showActive ? isActiveGroup : !isActiveGroup;
 
-                final crops = snapshot.data!;
+                    final cropName = (crop['crop_name'] ?? crop['name'] ?? "")
+                        .toString()
+                        .toLowerCase();
+                    final matchesSearch =
+                        _searchQuery.isEmpty || cropName.contains(_searchQuery);
 
-                // Filter based on Active/Inactive Tab
-                final filteredCrops = crops.where((crop) {
-                  final status = crop['status'] ?? 'Active';
-                  final double qty = (crop['quantity_kg'] ?? 0).toDouble();
+                    return matchesTab && matchesSearch;
+                  }).toList();
 
-                  // Active Logic: Must be 'Active'/'Verified' AND have physical stock > 0
-                  final isActiveGroup =
-                      ['Active', 'Verified', 'Growing'].contains(status) &&
-                          (qty > 0);
+                  if (filteredCrops.isEmpty) {
+                    return Center(
+                        child: Text(
+                            _searchQuery.isNotEmpty
+                                ? "No crops match '$_searchQuery'"
+                                : (showActive
+                                    ? "No active crops found"
+                                    : "No inactive crops found"),
+                            style:
+                                GoogleFonts.poppins(color: Colors.grey[500])));
+                  }
 
-                  return showActive ? isActiveGroup : !isActiveGroup;
-                }).toList();
+                  return ListView.builder(
+                    physics: const BouncingScrollPhysics(),
+                    keyboardDismissBehavior:
+                        ScrollViewKeyboardDismissBehavior.onDrag,
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 16, vertical: 8)
+                            .copyWith(bottom: 100),
+                    itemCount: filteredCrops.length,
+                    itemBuilder: (context, index) {
+                      final crop = filteredCrops[index];
 
-                if (filteredCrops.isEmpty) {
-                  return Center(
-                    child: Text(
-                      showActive
-                          ? "No active crops found"
-                          : "No inactive crops found",
-                      style: TextStyle(color: Colors.grey[500]),
-                    ),
+                      double qtyNum = _parseQuantity(crop['quantity']);
+                      if (qtyNum == 0)
+                        qtyNum = _parseQuantity(crop['quantity_kg']);
+
+                      String qtyValue = _formatNumber(qtyNum);
+
+                      final double reserved =
+                          _parseQuantity(crop['reserved_kg']);
+                      String unit = crop['unit'] ?? "Kg";
+                      String displayQty = "$qtyValue $unit";
+                      if (reserved > 0) {
+                        displayQty += " (${_formatNumber(reserved)} Reserved)";
+                      }
+
+                      String imageUrl = crop['image_url'] ?? '';
+                      if (imageUrl.isNotEmpty && !imageUrl.startsWith('http')) {
+                        imageUrl = _client.storage
+                            .from('crop_images')
+                            .getPublicUrl(imageUrl);
+                      } else if (imageUrl.isEmpty) {
+                        imageUrl = "https://via.placeholder.com/150";
+                      }
+
+                      String hDate = crop['harvest_date'] ?? 'N/A';
+                      String aDate = crop['available_from'] ?? 'N/A';
+                      try {
+                        if (hDate != 'N/A') {
+                          final d = DateTime.parse(hDate);
+                          hDate = "${d.day}/${d.month}/${d.year}";
+                        }
+                        if (aDate != 'N/A') {
+                          final d = DateTime.parse(aDate);
+                          aDate = "${d.day}/${d.month}/${d.year}";
+                        }
+                      } catch (_) {}
+
+                      double priceNum = _parseQuantity(crop['price']);
+                      if (priceNum == 0)
+                        priceNum = _parseQuantity(crop['price_per_qty']);
+                      String priceVal = _formatNumber(priceNum);
+
+                      return InspectorCropCard(
+                        cropName: crop['crop_name'] ?? "Unknown Crop",
+                        price: "₹$priceVal / $unit",
+                        quantity: displayQty,
+                        harvestDate: hDate,
+                        availableDate: aDate,
+                        imageUrl: imageUrl,
+                        status: crop['status'] ?? 'Active',
+                        onViewTap: () => Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                                builder: (_) => ViewCropScreen(
+                                    crop: crop, hideEditButton: false))),
+                        onEditTap: () => Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                                builder: (_) => InspectorEditCropScreen(
+                                    cropData: crop,
+                                    farmerId: widget.farmerId))),
+                        onDeleteTap: () => _confirmAndDeleteCrop(crop),
+                      );
+                    },
                   );
-                }
-
-                return ListView.builder(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                  itemCount: filteredCrops.length,
-                  itemBuilder: (context, index) {
-                    final crop = filteredCrops[index];
-
-                    // ✅✅✅ STOCK LOGIC (Matching my_crops_tab.dart) ✅✅✅
-                    // 1. Read 'quantity_kg' (Total Stock).
-                    String qtyValue = (crop['quantity_kg'] ?? 0).toString();
-                    qtyValue =
-                        qtyValue.replaceAll(RegExp(r"([.]*0)(?!.*\d)"), "");
-
-                    // 2. Read 'reserved_kg'
-                    final double reserved =
-                        (crop['reserved_kg'] ?? 0).toDouble();
-
-                    // 3. Unit Logic
-                    String unit = crop['unit'] ?? "Kg";
-                    if (unit == "Unit") {
-                      String rawLegacy = crop['quantity']?.toString() ?? "";
-                      if (rawLegacy.contains(' ')) {
-                        unit = rawLegacy.split(' ').sublist(1).join(' ');
-                      }
-                    }
-
-                    // 4. Construct Display String
-                    String displayQty = "$qtyValue $unit";
-
-                    // 5. Append Reserved Status
-                    if (reserved > 0) {
-                      String reservedStr = reserved
-                          .toString()
-                          .replaceAll(RegExp(r"([.]*0)(?!.*\d)"), "");
-                      displayQty += " ($reservedStr Reserved)";
-                    }
-                    // ✅✅✅ END STOCK LOGIC ✅✅✅
-
-                    // Helper for Image URL
-                    String imageUrl = crop['image_url'] ?? '';
-                    if (imageUrl.isNotEmpty && !imageUrl.startsWith('http')) {
-                      imageUrl = _client.storage
-                          .from('crop_images')
-                          .getPublicUrl(imageUrl);
-                    } else if (imageUrl.isEmpty) {
-                      imageUrl = "https://via.placeholder.com/150"; // Fallback
-                    }
-
-                    // Format Dates (Basic)
-                    String hDate = crop['harvest_date'] ?? 'N/A';
-                    String aDate = crop['available_from'] ?? 'N/A';
-                    try {
-                      if (hDate != 'N/A') {
-                        final d = DateTime.parse(hDate);
-                        hDate = "${d.day}/${d.month}/${d.year}";
-                      }
-                      if (aDate != 'N/A') {
-                        final d = DateTime.parse(aDate);
-                        aDate = "${d.day}/${d.month}/${d.year}";
-                      }
-                    } catch (_) {}
-
-                    // Price Logic
-                    String priceVal = crop['price']?.toString() ??
-                        crop['price_per_qty']?.toString() ??
-                        '0';
-                    priceVal =
-                        priceVal.replaceAll(RegExp(r"([.]*0)(?!.*\d)"), "");
-
-                    return InspectorCropCard(
-                      cropName: crop['crop_name'] ?? "Unknown Crop",
-                      price: "₹$priceVal / $unit",
-                      quantity: displayQty, // ✅ Correct String Passed
-                      harvestDate: hDate,
-                      availableDate: aDate,
-                      imageUrl: imageUrl,
-                      isActive: showActive,
-                      onViewTap: () {
-                        // Navigate to view details if needed
-                      },
-                      onEditTap: () {
-                        // Navigate to edit if needed
-                      },
-                      onDeleteTap: () {
-                        // Delete logic
-                      },
-                    );
-                  },
-                );
-              },
+                },
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
-      // --- 4. Floating Action Button ---
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: () {
-          // Logic to add crop on behalf of farmer
-        },
-        backgroundColor: const Color(0xFF387C2B),
+        onPressed: () => Navigator.push(
+            context,
+            MaterialPageRoute(
+                builder: (_) => AddCropTab(farmerId: widget.farmerId))),
+        backgroundColor: _inspectorColor,
         icon: const Icon(Icons.add, color: Colors.white),
-        label: const Text("Add Crop", style: TextStyle(color: Colors.white)),
+        label: Text("Add Crop",
+            style: GoogleFonts.poppins(
+                color: Colors.white, fontWeight: FontWeight.w600)),
       ),
     );
   }
 
-  // Helper for the Toggle Buttons
   Widget _buildTabButton(String text, bool isActiveTab) {
     bool isSelected = showActive == isActiveTab;
     return GestureDetector(
-      onTap: () {
-        setState(() {
-          showActive = isActiveTab;
-        });
-      },
-      child: Container(
+      onTap: () => setState(() => showActive = isActiveTab),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
         padding: const EdgeInsets.symmetric(vertical: 12),
         decoration: BoxDecoration(
-          color: isSelected ? const Color(0xFF387C2B) : Colors.white,
-          borderRadius: BorderRadius.circular(8),
-          border: isSelected ? null : Border.all(color: Colors.grey.shade300),
-        ),
+            color: isSelected ? _inspectorColor : Colors.white,
+            borderRadius: BorderRadius.circular(8),
+            border:
+                isSelected ? null : Border.all(color: Colors.grey.shade300)),
         child: Center(
-          child: Text(
-            text,
-            style: TextStyle(
-              color: isSelected ? Colors.white : Colors.grey[600],
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-        ),
+            child: Text(text,
+                style: GoogleFonts.poppins(
+                    color: isSelected ? Colors.white : Colors.grey[600],
+                    fontWeight: FontWeight.w600,
+                    fontSize: 13))),
       ),
     );
   }

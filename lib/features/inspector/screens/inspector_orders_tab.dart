@@ -1,15 +1,22 @@
 import 'dart:async';
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:intl/intl.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:flutter_polyline_points/flutter_polyline_points.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:provider/provider.dart';
+import 'package:geolocator/geolocator.dart';
+import 'dart:math' as math;
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:intl/intl.dart';
+import 'package:provider/provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 // ✅ CORE & FEATURE IMPORTS
 import 'package:agriyukt_app/core/providers/language_provider.dart';
 import 'package:agriyukt_app/features/inspector/screens/inspector_order_detail_screen.dart';
+import 'package:agriyukt_app/features/farmer/screens/view_crop_screen.dart'; // 🚀 Shared Crop Viewer
 
 class InspectorOrdersTab extends StatefulWidget {
   final int initialIndex;
@@ -91,7 +98,7 @@ class _InspectorOrdersTabState extends State<InspectorOrdersTab>
   }
 
   // =======================================================================
-  // 📦 DATA FETCHING ENGINE (Fixed Inner Join & Null Safety)
+  // 📦 DATA FETCHING ENGINE
   // =======================================================================
   Future<void> _fetchManagedOrders({bool isSilent = false}) async {
     try {
@@ -109,7 +116,7 @@ class _InspectorOrdersTabState extends State<InspectorOrdersTab>
           .from('orders')
           .select('''
             *,
-            crops(id, crop_name, image_url, price, variety, grade),
+            crops(id, crop_name, image_url, price, variety, grade, description),
             buyer:profiles!orders_buyer_id_fkey(first_name, last_name, phone, district, state),
             farmer:profiles!orders_farmer_id_fkey!inner(id, first_name, last_name, phone, district, state, inspector_id, latitude, longitude)
           ''')
@@ -241,7 +248,7 @@ class _InspectorOrdersTabState extends State<InspectorOrdersTab>
     }
 
     if (_tabController.index != targetTab) {
-      _tabController.animateTo(targetTab); // ✅ FIX: Prevents UI desync
+      _tabController.animateTo(targetTab);
     }
 
     List<Map<String, dynamic>> targetList = targetTab == 0
@@ -271,7 +278,8 @@ class _InspectorOrdersTabState extends State<InspectorOrdersTab>
         Future.delayed(const Duration(milliseconds: 100), () {
           if (mounted && controller.hasClients) {
             final maxScroll = controller.position.maxScrollExtent;
-            double targetOffset = index * 271.0;
+            // 🚀 EXACT MATH: 290 Card Height + 16 Gap = 306.0
+            double targetOffset = index * 306.0;
             if (targetOffset > maxScroll) targetOffset = maxScroll;
 
             controller.animateTo(
@@ -623,7 +631,6 @@ class _OrderListState extends State<_OrderList>
             isHighlighted: isHighlighted,
             themeColor: widget.themeColor,
             onRefresh: () async {
-              // ✅ POP CRASH FIX: Ensure parent is mounted before executing callback
               if (mounted) {
                 await widget.onRefresh(isSilent: true);
               }
@@ -644,7 +651,7 @@ class _SkeletonOrderCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      height: 255,
+      height: 290, // 🚀 UPDATED: Taller skeleton to match actual card
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(16),
@@ -654,8 +661,7 @@ class _SkeletonOrderCard extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Container(
-            height: 46,
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
             decoration: BoxDecoration(
                 color: Colors.grey.shade50,
                 borderRadius: const BorderRadius.only(
@@ -689,8 +695,8 @@ class _SkeletonOrderCard extends StatelessWidget {
               child: Row(
                 children: [
                   Container(
-                      height: 90,
-                      width: 90,
+                      height: 110, // 🚀 UPDATED SIZE
+                      width: 110, // 🚀 UPDATED SIZE
                       decoration: BoxDecoration(
                           color: Colors.grey.shade200,
                           borderRadius: BorderRadius.circular(12))),
@@ -716,15 +722,14 @@ class _SkeletonOrderCard extends StatelessWidget {
             ),
           ),
           const Divider(height: 1, thickness: 1, color: Color(0xFFF0F0F0)),
-          Container(
-            height: 60,
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Container(height: 12, width: 100, color: Colors.grey.shade200),
                 Container(
-                    height: 36,
+                    height: 38,
                     width: 120,
                     decoration: BoxDecoration(
                         color: Colors.grey.shade200,
@@ -739,7 +744,7 @@ class _SkeletonOrderCard extends StatelessWidget {
 }
 
 // ============================================================================
-// ✅ THE UNCOMPROMISED PREMIUM INSPECTOR CARD (Matches Farmer UI)
+// ✅ THE UNCOMPROMISED PREMIUM INSPECTOR CARD
 // ============================================================================
 class _InspectorOrderCard extends StatefulWidget {
   final Map<String, dynamic> order;
@@ -776,6 +781,24 @@ class _InspectorOrderCardState extends State<_InspectorOrderCard> {
       Future.delayed(const Duration(seconds: 3), () {
         if (mounted) setState(() => _isHighlighted = false);
       });
+    }
+  }
+
+  // 🚀 CALL LAUNCHER LOGIC
+  Future<void> _makePhoneCall(String phoneNumber) async {
+    final Uri launchUri = Uri(scheme: 'tel', path: phoneNumber);
+    if (await canLaunchUrl(launchUri)) {
+      await launchUrl(launchUri);
+    } else {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text("Could not launch phone dialer",
+                style: GoogleFonts.poppins()),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
     }
   }
 
@@ -831,9 +854,12 @@ class _InspectorOrderCardState extends State<_InspectorOrderCard> {
     final farmer = rawFarmer is Map
         ? rawFarmer
         : (rawFarmer is List && rawFarmer.isNotEmpty ? rawFarmer[0] : {});
+
     final String farmerName =
         "${farmer['first_name'] ?? 'Farmer'} ${farmer['last_name'] ?? ''}"
             .trim();
+    // 🚀 Extract Farmer's phone number
+    final String farmerPhone = (farmer['phone'] ?? '').toString().trim();
 
     final String orderDate = _formatRelativeDate(order['created_at']);
     final String orderIdDisplay = "#${fullId.substring(0, 8).toUpperCase()}";
@@ -849,15 +875,15 @@ class _InspectorOrderCardState extends State<_InspectorOrderCard> {
     final qty = qtyRaw != null ? (num.tryParse(qtyRaw.toString()) ?? 0) : 0;
 
     final rawCrop = order['crops'];
-    final crop = rawCrop is Map
+    final cropMap = rawCrop is Map
         ? rawCrop
         : (rawCrop is List && rawCrop.isNotEmpty ? rawCrop[0] : {});
 
-    String cropName = crop['crop_name'] ?? order['crop_name'] ?? "Crop Item";
-    String? imgUrl = crop['image_url'];
+    String cropName = cropMap['crop_name'] ?? order['crop_name'] ?? "Crop Item";
+    String? imgUrl = cropMap['image_url'];
 
-    String cropVariety = crop['variety'] ?? order['variety'] ?? '';
-    String cropGrade = crop['grade'] ?? order['grade'] ?? '';
+    String cropVariety = cropMap['variety'] ?? order['variety'] ?? '';
+    String cropGrade = cropMap['grade'] ?? order['grade'] ?? '';
 
     String displayTitle = cropName;
     if (cropVariety.isNotEmpty && cropVariety.toLowerCase() != 'null') {
@@ -868,7 +894,7 @@ class _InspectorOrderCardState extends State<_InspectorOrderCard> {
       child: AnimatedContainer(
         duration: const Duration(seconds: 1),
         curve: Curves.easeInOut,
-        height: 255, // 🔒 EXACT HARDWARE GEOMETRY LOCK
+        height: 290, // 🚀 UPDATED: Taller card for the 110x110 image
         decoration: BoxDecoration(
           color: _isHighlighted ? const Color(0xFFF3E5F5) : Colors.white,
           borderRadius: BorderRadius.circular(16),
@@ -906,10 +932,10 @@ class _InspectorOrderCardState extends State<_InspectorOrderCard> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                // 🚀 FLUID HEADER
                 Container(
-                  height: 46,
                   padding:
-                      const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
                   decoration: BoxDecoration(
                     color: _isHighlighted
                         ? Colors.transparent
@@ -933,14 +959,17 @@ class _InspectorOrderCardState extends State<_InspectorOrderCard> {
                                         ? farmerName[0].toUpperCase()
                                         : "F",
                                     style: GoogleFonts.poppins(
-                                        fontSize: 11,
+                                        fontSize: 11, // 🚀 Adjusted size
                                         fontWeight: FontWeight.bold,
                                         color: widget.themeColor))),
                             const SizedBox(width: 8),
                             Expanded(
-                              child: Text(farmerName,
+                              child: Text(
+                                  farmerName.isNotEmpty
+                                      ? farmerName
+                                      : "Unknown Farmer",
                                   style: GoogleFonts.poppins(
-                                      fontSize: 13,
+                                      fontSize: 14, // 🚀 Increased size
                                       fontWeight: FontWeight.bold,
                                       color: Colors.black87),
                                   maxLines: 1,
@@ -964,7 +993,7 @@ class _InspectorOrderCardState extends State<_InspectorOrderCard> {
                                 style: GoogleFonts.poppins(
                                     color: statusColor,
                                     fontWeight: FontWeight.bold,
-                                    fontSize: 9,
+                                    fontSize: 10, // 🚀 Adjusted size
                                     letterSpacing: 0.5)),
                           ],
                         ),
@@ -974,52 +1003,73 @@ class _InspectorOrderCardState extends State<_InspectorOrderCard> {
                 ),
                 const Divider(
                     height: 1, thickness: 1, color: Color(0xFFF0F0F0)),
+
+                // 🚀 FLUID BODY & LARGER IMAGE
                 Expanded(
                   child: Padding(
                     padding: const EdgeInsets.all(14),
                     child: Row(
                       crossAxisAlignment: CrossAxisAlignment.center,
                       children: [
-                        SizedBox(
-                          height: 90,
-                          width: 90,
-                          child: Container(
-                            decoration: BoxDecoration(
-                              color: Colors.grey.shade100,
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(color: Colors.grey.shade200),
-                            ),
-                            child: Material(
-                              color: Colors.transparent,
-                              borderRadius: BorderRadius.circular(11),
-                              child: ClipRRect(
+                        GestureDetector(
+                          onTap: () {
+                            HapticFeedback.lightImpact();
+                            // 🚀 ROUTES TO SHARED VIEWER
+                            Navigator.push(
+                                context,
+                                PageRouteBuilder(
+                                  transitionDuration:
+                                      const Duration(milliseconds: 300),
+                                  pageBuilder: (_, __, ___) =>
+                                      ViewCropScreen(crop: cropMap),
+                                  transitionsBuilder: (_, anim, __, child) =>
+                                      FadeTransition(
+                                          opacity: anim, child: child),
+                                ));
+                          },
+                          child: SizedBox(
+                            height: 110, // 🚀 UPDATED SIZE
+                            width: 110, // 🚀 UPDATED SIZE
+                            child: Container(
+                              decoration: BoxDecoration(
+                                color: Colors.grey.shade100,
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(color: Colors.grey.shade200),
+                              ),
+                              child: Material(
+                                color: Colors.transparent,
                                 borderRadius: BorderRadius.circular(11),
-                                // ✅ HERO CRASH FIX: Appended tabType to prevent Duplicate Hero Tag errors during transitions
-                                child: Hero(
-                                  tag:
-                                      'inspector_order_img_${fullId}_${widget.tabType}',
-                                  child: (imgUrl != null && imgUrl.isNotEmpty)
-                                      ? CachedNetworkImage(
-                                          imageUrl: imgUrl.startsWith('http')
-                                              ? imgUrl
-                                              : Supabase.instance.client.storage
-                                                  .from('crop_images')
-                                                  .getPublicUrl(imgUrl),
-                                          fit: BoxFit.cover,
-                                          memCacheWidth: 250,
-                                          memCacheHeight: 250,
-                                          fadeInDuration:
-                                              const Duration(milliseconds: 150),
-                                          placeholder: (c, u) => Container(
-                                              color: Colors.grey.shade100),
-                                          errorWidget: (context, url, error) =>
-                                              const Icon(
-                                                  Icons.image_not_supported,
-                                                  color: Colors.grey),
-                                        )
-                                      : Image.asset(
-                                          'assets/images/placeholder_crop.png',
-                                          fit: BoxFit.cover),
+                                child: ClipRRect(
+                                  borderRadius: BorderRadius.circular(11),
+                                  child: Hero(
+                                    tag:
+                                        'inspector_order_img_${fullId}_${widget.tabType}',
+                                    child: (imgUrl != null && imgUrl.isNotEmpty)
+                                        ? CachedNetworkImage(
+                                            imageUrl: imgUrl.startsWith('http')
+                                                ? imgUrl
+                                                : Supabase
+                                                    .instance.client.storage
+                                                    .from('crop_images')
+                                                    .getPublicUrl(imgUrl),
+                                            fit: BoxFit.cover,
+                                            memCacheWidth:
+                                                300, // 🚀 Maintain quality
+                                            memCacheHeight: 300,
+                                            fadeInDuration: const Duration(
+                                                milliseconds: 150),
+                                            placeholder: (c, u) => Container(
+                                                color: Colors.grey.shade100),
+                                            errorWidget: (context, url,
+                                                    error) =>
+                                                const Icon(
+                                                    Icons.image_not_supported,
+                                                    color: Colors.grey),
+                                          )
+                                        : Image.asset(
+                                            'assets/images/placeholder_crop.png',
+                                            fit: BoxFit.cover),
+                                  ),
                                 ),
                               ),
                             ),
@@ -1031,17 +1081,16 @@ class _InspectorOrderCardState extends State<_InspectorOrderCard> {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
-                              Flexible(
-                                child: Text(displayTitle,
-                                    style: GoogleFonts.poppins(
-                                        fontSize: 16,
-                                        fontWeight: FontWeight.bold,
-                                        color: Colors.black87,
-                                        letterSpacing: -0.5,
-                                        height: 1.2),
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis),
-                              ),
+                              // 🔒 LOOPHOLE CLOSED: Removed Flexible wrapper
+                              Text(displayTitle,
+                                  style: GoogleFonts.poppins(
+                                      fontSize: 16, // 🚀 Standardized Font
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.black87,
+                                      letterSpacing: -0.5,
+                                      height: 1.2),
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis),
                               if (cropGrade.isNotEmpty &&
                                   cropGrade.toLowerCase() != 'null')
                                 Padding(
@@ -1057,7 +1106,7 @@ class _InspectorOrderCardState extends State<_InspectorOrderCard> {
                                             color: Colors.grey.shade300)),
                                     child: Text("Grade $cropGrade",
                                         style: GoogleFonts.poppins(
-                                            fontSize: 10,
+                                            fontSize: 11,
                                             color: Colors.grey.shade700,
                                             fontWeight: FontWeight.w600),
                                         maxLines: 1,
@@ -1071,13 +1120,13 @@ class _InspectorOrderCardState extends State<_InspectorOrderCard> {
                                 children: [
                                   Text(formattedPrice,
                                       style: GoogleFonts.poppins(
-                                          fontSize: 16,
+                                          fontSize: 18, // 🚀 Standardized Price
                                           fontWeight: FontWeight.bold,
                                           color: Colors.black87)),
                                   const SizedBox(width: 6),
-                                  Text("•  $qty kg",
+                                  Text("•  $qty kg",
                                       style: GoogleFonts.poppins(
-                                          fontSize: 12,
+                                          fontSize: 13, // 🚀 Standardized Qty
                                           fontWeight: FontWeight.w500,
                                           color: Colors.grey.shade600)),
                                 ],
@@ -1085,16 +1134,24 @@ class _InspectorOrderCardState extends State<_InspectorOrderCard> {
                             ],
                           ),
                         ),
+                        // 🚀 UX Hint Chevron
+                        if (widget.tabType != 'pending')
+                          Padding(
+                            padding: const EdgeInsets.only(left: 8.0),
+                            child: Icon(Icons.arrow_forward_ios_rounded,
+                                color: Colors.grey.shade400, size: 16),
+                          ),
                       ],
                     ),
                   ),
                 ),
                 const Divider(
                     height: 1, thickness: 1, color: Color(0xFFF0F0F0)),
-                Container(
-                  height: 60,
+
+                // 🚀 FLUID FOOTER
+                Padding(
                   padding:
-                      const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
@@ -1105,15 +1162,24 @@ class _InspectorOrderCardState extends State<_InspectorOrderCard> {
                             children: [
                               Text("Ordered: $orderDate",
                                   style: GoogleFonts.poppins(
-                                      fontSize: 11,
+                                      fontSize: 12,
                                       fontWeight: FontWeight.w600,
                                       color: Colors.grey.shade600)),
                               const SizedBox(height: 2),
-                              Text(orderIdDisplay,
-                                  style: GoogleFonts.jetBrainsMono(
-                                      fontSize: 10,
-                                      color: Colors.grey.shade400,
-                                      fontWeight: FontWeight.w500)),
+                              // 🚀 HIGHLIGHTED, HIGH-CONTRAST ORDER ID PILL
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 6, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFE3F2FD),
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                                child: Text(orderIdDisplay,
+                                    style: GoogleFonts.jetBrainsMono(
+                                        fontSize: 11,
+                                        color: const Color(0xFF1565C0),
+                                        fontWeight: FontWeight.w700)),
+                              ),
                             ],
                           ),
                         ),
@@ -1140,7 +1206,8 @@ class _InspectorOrderCardState extends State<_InspectorOrderCard> {
                                   ? BorderSide.none
                                   : BorderSide(color: Colors.grey.shade300),
                               elevation: 0,
-                              minimumSize: const Size(120, 36),
+                              minimumSize:
+                                  const Size(120, 38), // 🚀 Safe button height
                               shape: RoundedRectangleBorder(
                                   borderRadius: BorderRadius.circular(100)),
                               padding: const EdgeInsets.symmetric(
@@ -1153,10 +1220,31 @@ class _InspectorOrderCardState extends State<_InspectorOrderCard> {
                                   fontSize: 12, fontWeight: FontWeight.bold)),
                         )
                       ] else ...[
-                        // PENDING ACTION BUTTONS
+                        // 🚀 PENDING ACTION BUTTONS
+                        if (farmerPhone.isNotEmpty) ...[
+                          Tooltip(
+                            message: "Call Farmer",
+                            child: InkWell(
+                              onTap: () => _makePhoneCall(farmerPhone),
+                              borderRadius: BorderRadius.circular(18),
+                              child: Container(
+                                height: 38,
+                                width: 38,
+                                decoration: BoxDecoration(
+                                    color: Colors.green.shade50,
+                                    shape: BoxShape.circle,
+                                    border: Border.all(
+                                        color: Colors.green.shade200)),
+                                child: Icon(Icons.call,
+                                    size: 18, color: Colors.green.shade700),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                        ],
                         Expanded(
                           child: SizedBox(
-                            height: 36,
+                            height: 38, // 🚀 Safe Button Height
                             child: OutlinedButton(
                               onPressed: (_isAccepting || _isRejecting)
                                   ? null
@@ -1195,7 +1283,7 @@ class _InspectorOrderCardState extends State<_InspectorOrderCard> {
                         const SizedBox(width: 12),
                         Expanded(
                           child: SizedBox(
-                            height: 36,
+                            height: 38, // 🚀 Safe Button Height
                             child: ElevatedButton(
                               onPressed: (_isAccepting || _isRejecting)
                                   ? null

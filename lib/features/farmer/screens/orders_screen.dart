@@ -59,12 +59,15 @@ class _OrdersScreenState extends State<OrdersScreen>
     WidgetsBinding.instance.addObserver(this);
     _tabController = TabController(
         length: 3, vsync: this, initialIndex: widget.initialIndex);
+
+    // 🔒 LOOPHOLE CLOSED: Keyboard Trap Prevention
     _tabController.addListener(() {
       if (_tabController.indexIsChanging) {
         FocusScope.of(context).unfocus();
         HapticFeedback.selectionClick();
       }
     });
+
     _fetchOrders();
     _setupRealtimeSubscription();
   }
@@ -315,7 +318,6 @@ class _OrdersScreenState extends State<OrdersScreen>
     }
   }
 
-  // ✅ HARDWARE POLLING ENGINE: Guarantees jumpTo fires exactly when UI is ready
   void _safeScrollTo(ScrollController? controller, int index) {
     if (controller == null) return;
     int retries = 0;
@@ -325,8 +327,7 @@ class _OrdersScreenState extends State<OrdersScreen>
         return;
       }
       if (controller.hasClients) {
-        controller
-            .jumpTo(index * 271.0); // 🔒 EXACT MATH: Card (255) + Gap (16)
+        controller.jumpTo(index * 306.0);
         timer.cancel();
       } else if (retries > 25) {
         timer.cancel();
@@ -336,83 +337,82 @@ class _OrdersScreenState extends State<OrdersScreen>
   }
 
   // =======================================================================
-  // 🛡️ STATUS MUTATION LOGIC (WITH INVENTORY DEDUCTION)
+  // 🛡️ STATUS MUTATION LOGIC (WITH ANTI-CORRUPTION TRANSACTIONS)
   // =======================================================================
   Future<bool> _updateStatus(dynamic orderId, String newStatus) async {
     HapticFeedback.mediumImpact();
     try {
-      // 1️⃣ DEDUCT INVENTORY LOGIC (Only runs if ACCEPTING)
-      if (newStatus.toLowerCase() == 'accepted') {
-        // Find local order to get quantities safely
-        final orderData = _allOrders
-            .firstWhere((o) => o['id'].toString() == orderId.toString());
-        final String cropId = orderData['crop_id'].toString();
-
-        // Safely parse the order quantity
-        final double orderQty = double.tryParse(orderData['quantity_kg']
-                    ?.toString()
-                    .replaceAll(RegExp(r'[^0-9.]'), '') ??
-                orderData['quantity']
-                    ?.toString()
-                    .replaceAll(RegExp(r'[^0-9.]'), '') ??
-                '0') ??
-            0.0;
-
-        // Fetch CURRENT live crop stock from DB
-        final cropRes =
-            await _supabase.from('crops').select().eq('id', cropId).single();
-        final bool hasNewColumn = cropRes.containsKey('quantity_kg');
-
-        double currentStock = 0.0;
-        if (hasNewColumn && cropRes['quantity_kg'] != null) {
-          currentStock = (cropRes['quantity_kg'] as num).toDouble();
-        } else {
-          final String legacyQty = cropRes['quantity']?.toString() ?? '0';
-          currentStock =
-              double.tryParse(legacyQty.replaceAll(RegExp(r'[^0-9.]'), '')) ??
-                  0.0;
-        }
-
-        // Calculate Stock Safely
-        double newStock = currentStock - orderQty;
-        if (newStock < 0) newStock = 0.0;
-
-        String cropStatus = cropRes['status'];
-        if (newStock <= 0) cropStatus = 'Sold'; // Auto Mark Sold
-
-        // Prepare Update Payload dynamically based on schema
-        final Map<String, dynamic> cropUpdateData = {
-          'quantity': newStock.toString(), // Keep legacy column updated
-          'status': cropStatus,
-        };
-        if (hasNewColumn) {
-          cropUpdateData['quantity_kg'] = newStock;
-        }
-
-        // Update Crop Table
-        await _supabase.from('crops').update(cropUpdateData).eq('id', cropId);
-      }
-
-      // 2️⃣ UPDATE LOCAL UI STATE INSTANTLY
-      setState(() {
-        final orderIndex = _allOrders
-            .indexWhere((o) => o['id'].toString() == orderId.toString());
-        if (orderIndex != -1) {
-          final updatedCard = Map<String, dynamic>.from(_allOrders[orderIndex]);
-          updatedCard['status'] = newStatus;
-          updatedCard['tracking_status'] = newStatus;
-          _allOrders[orderIndex] = updatedCard;
-        }
-      });
-
-      // 3️⃣ UPDATE ORDER STATUS IN DATABASE
+      // 🔒 LOOPHOLE CLOSED: Secure the Order Data first!
+      // If we deduct crop inventory first and the order API fails, the stock is lost forever.
       await _supabase
           .from('orders')
           .update({'status': newStatus, 'tracking_status': newStatus}).eq(
               'id', orderId);
 
-      // 4️⃣ SHOW SUCCESS SNACKBAR
+      // 1️⃣ DEDUCT INVENTORY LOGIC (Only runs if order successfully accepted)
+      if (newStatus.toLowerCase() == 'accepted') {
+        try {
+          final orderData = _allOrders
+              .firstWhere((o) => o['id'].toString() == orderId.toString());
+          final String cropId = orderData['crop_id'].toString();
+
+          final double orderQty = double.tryParse(orderData['quantity_kg']
+                      ?.toString()
+                      .replaceAll(RegExp(r'[^0-9.]'), '') ??
+                  orderData['quantity']
+                      ?.toString()
+                      .replaceAll(RegExp(r'[^0-9.]'), '') ??
+                  '0') ??
+              0.0;
+
+          final cropRes =
+              await _supabase.from('crops').select().eq('id', cropId).single();
+          final bool hasNewColumn = cropRes.containsKey('quantity_kg');
+
+          double currentStock = 0.0;
+          if (hasNewColumn && cropRes['quantity_kg'] != null) {
+            currentStock = (cropRes['quantity_kg'] as num).toDouble();
+          } else {
+            final String legacyQty = cropRes['quantity']?.toString() ?? '0';
+            currentStock =
+                double.tryParse(legacyQty.replaceAll(RegExp(r'[^0-9.]'), '')) ??
+                    0.0;
+          }
+
+          double newStock = currentStock - orderQty;
+          if (newStock < 0) newStock = 0.0;
+
+          String cropStatus = cropRes['status'];
+          if (newStock <= 0) cropStatus = 'Sold';
+
+          final Map<String, dynamic> cropUpdateData = {
+            'quantity': newStock.toString(),
+            'status': cropStatus,
+          };
+          if (hasNewColumn) cropUpdateData['quantity_kg'] = newStock;
+
+          await _supabase.from('crops').update(cropUpdateData).eq('id', cropId);
+        } catch (cropError) {
+          // Even if crop deduction fails due to schema issues, the order is safely accepted.
+          debugPrint(
+              "Warning: Crop deduction failed, but order accepted. $cropError");
+        }
+      }
+
+      // 2️⃣ UPDATE LOCAL UI STATE INSTANTLY (Optimistic UI)
       if (mounted) {
+        setState(() {
+          final orderIndex = _allOrders
+              .indexWhere((o) => o['id'].toString() == orderId.toString());
+          if (orderIndex != -1) {
+            final updatedCard =
+                Map<String, dynamic>.from(_allOrders[orderIndex]);
+            updatedCard['status'] = newStatus;
+            updatedCard['tracking_status'] = newStatus;
+            _allOrders[orderIndex] = updatedCard;
+          }
+        });
+
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Row(children: [
@@ -424,7 +424,7 @@ class _OrdersScreenState extends State<OrdersScreen>
               const SizedBox(width: 12),
               Text(
                   newStatus.toLowerCase() == 'accepted'
-                      ? "Order Accepted & Stock Updated"
+                      ? "Order Accepted"
                       : "Order $newStatus",
                   style: GoogleFonts.poppins(fontWeight: FontWeight.w600)),
             ]),
@@ -441,19 +441,18 @@ class _OrdersScreenState extends State<OrdersScreen>
     } catch (e) {
       debugPrint("Error updating status: $e");
       if (mounted) {
-        String msg = "Error: $e";
-        if (e.toString().contains("quantity_kg")) {
-          msg = "Schema Error: 'quantity_kg' column missing.";
-        }
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(msg, style: GoogleFonts.poppins()),
+          content: Text("Action Failed. Please check connection.",
+              style: GoogleFonts.poppins()),
           backgroundColor: Colors.red,
         ));
       }
-      _fetchOrders(isSilent: true); // Revert UI if DB fails
+      _fetchOrders(isSilent: true); // Force revert UI
       return false;
     }
   }
+
+  String _text(String key) => FarmerText.get(context, key);
 
   @override
   Widget build(BuildContext context) {
@@ -461,8 +460,7 @@ class _OrdersScreenState extends State<OrdersScreen>
     final myId = _supabase.auth.currentUser?.id;
 
     if (myId == null) {
-      return const Scaffold(
-          body: Center(child: Text("Authentication Required")));
+      return Scaffold(body: Center(child: Text(_text('login_required'))));
     }
 
     final pending = _getPendingOrders();
@@ -497,7 +495,8 @@ class _OrdersScreenState extends State<OrdersScreen>
             textInputAction: TextInputAction.search,
             onSubmitted: (_) => FocusScope.of(context).unfocus(),
             decoration: InputDecoration(
-              hintText: "Search buyer name, crop, or Order ID...",
+              hintText:
+                  "Search name, crop, or ID...", // Cleaned up for localization
               hintStyle: GoogleFonts.poppins(
                   color: Colors.grey.shade400, fontSize: 13),
               prefixIcon: Icon(Icons.search_rounded,
@@ -527,10 +526,10 @@ class _OrdersScreenState extends State<OrdersScreen>
           unselectedLabelStyle:
               GoogleFonts.poppins(fontWeight: FontWeight.w500, fontSize: 13),
           indicatorWeight: 3,
-          tabs: const [
-            Tab(text: "Requests"),
-            Tab(text: "Active"),
-            Tab(text: "History"),
+          tabs: [
+            Tab(text: _text('requests')),
+            Tab(text: _text('active')),
+            const Tab(text: "History"),
           ],
         ),
       ),
@@ -742,7 +741,7 @@ class _SkeletonOrderCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      height: 255,
+      height: 290,
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(16),
@@ -752,8 +751,7 @@ class _SkeletonOrderCard extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Container(
-            height: 46,
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
             decoration: BoxDecoration(
                 color: Colors.grey.shade50,
                 borderRadius: const BorderRadius.only(
@@ -787,8 +785,8 @@ class _SkeletonOrderCard extends StatelessWidget {
               child: Row(
                 children: [
                   Container(
-                      height: 90,
-                      width: 90,
+                      height: 110,
+                      width: 110,
                       decoration: BoxDecoration(
                           color: Colors.grey.shade200,
                           borderRadius: BorderRadius.circular(12))),
@@ -814,15 +812,14 @@ class _SkeletonOrderCard extends StatelessWidget {
             ),
           ),
           const Divider(height: 1, thickness: 1, color: Color(0xFFF0F0F0)),
-          Container(
-            height: 60,
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Container(height: 12, width: 100, color: Colors.grey.shade200),
                 Container(
-                    height: 36,
+                    height: 38,
                     width: 120,
                     decoration: BoxDecoration(
                         color: Colors.grey.shade200,
@@ -937,7 +934,6 @@ class _FarmerOrderCardState extends State<_FarmerOrderCard> {
 
     String cropName = crop['crop_name'] ?? order['crop_name'] ?? "Crop Item";
     String? imgUrl = crop['image_url'];
-
     String cropVariety = crop['variety'] ?? order['variety'] ?? '';
     String cropGrade = crop['grade'] ?? order['grade'] ?? '';
 
@@ -948,7 +944,7 @@ class _FarmerOrderCardState extends State<_FarmerOrderCard> {
 
     return RepaintBoundary(
       child: Container(
-        height: 255, // 🔒 EXACT HARDWARE GEOMETRY LOCK
+        height: 290,
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(16),
@@ -988,10 +984,10 @@ class _FarmerOrderCardState extends State<_FarmerOrderCard> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                // 🚀 HEADER
                 Container(
-                  height: 46, // 🔒 Fixed
                   padding:
-                      const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
                   decoration: BoxDecoration(
                     color: widget.isHighlighted
                         ? const Color(0xFF1B5E20).withOpacity(0.05)
@@ -1021,7 +1017,7 @@ class _FarmerOrderCardState extends State<_FarmerOrderCard> {
                             Expanded(
                               child: Text(buyerName,
                                   style: GoogleFonts.poppins(
-                                      fontSize: 13,
+                                      fontSize: 14,
                                       fontWeight: FontWeight.bold,
                                       color: Colors.black87),
                                   maxLines: 1,
@@ -1045,7 +1041,7 @@ class _FarmerOrderCardState extends State<_FarmerOrderCard> {
                                 style: GoogleFonts.poppins(
                                     color: statusColor,
                                     fontWeight: FontWeight.bold,
-                                    fontSize: 9,
+                                    fontSize: 10,
                                     letterSpacing: 0.5)),
                           ],
                         ),
@@ -1055,6 +1051,7 @@ class _FarmerOrderCardState extends State<_FarmerOrderCard> {
                 ),
                 const Divider(
                     height: 1, thickness: 1, color: Color(0xFFF0F0F0)),
+                // 🚀 BODY
                 Expanded(
                   child: Padding(
                     padding: const EdgeInsets.all(14),
@@ -1062,8 +1059,8 @@ class _FarmerOrderCardState extends State<_FarmerOrderCard> {
                       crossAxisAlignment: CrossAxisAlignment.center,
                       children: [
                         SizedBox(
-                          height: 90,
-                          width: 90,
+                          height: 110,
+                          width: 110,
                           child: Container(
                             decoration: BoxDecoration(
                               color: Colors.grey.shade100,
@@ -1075,8 +1072,10 @@ class _FarmerOrderCardState extends State<_FarmerOrderCard> {
                               borderRadius: BorderRadius.circular(11),
                               child: ClipRRect(
                                 borderRadius: BorderRadius.circular(11),
+                                // 🔒 LOOPHOLE CLOSED: Unique Hero Tag per Tab to prevent crash
                                 child: Hero(
-                                  tag: 'farmer_order_img_$fullId',
+                                  tag:
+                                      'farmer_order_img_${widget.tabType}_$fullId',
                                   child: (imgUrl != null && imgUrl.isNotEmpty)
                                       ? CachedNetworkImage(
                                           imageUrl: imgUrl.startsWith('http')
@@ -1085,8 +1084,8 @@ class _FarmerOrderCardState extends State<_FarmerOrderCard> {
                                                   .from('crop_images')
                                                   .getPublicUrl(imgUrl),
                                           fit: BoxFit.cover,
-                                          memCacheWidth: 250,
-                                          memCacheHeight: 250,
+                                          memCacheWidth: 300,
+                                          memCacheHeight: 300,
                                           fadeInDuration:
                                               const Duration(milliseconds: 150),
                                           placeholder: (c, u) => Container(
@@ -1136,7 +1135,7 @@ class _FarmerOrderCardState extends State<_FarmerOrderCard> {
                                             color: Colors.grey.shade300)),
                                     child: Text("Grade $cropGrade",
                                         style: GoogleFonts.poppins(
-                                            fontSize: 10,
+                                            fontSize: 11,
                                             color: Colors.grey.shade700,
                                             fontWeight: FontWeight.w600),
                                         maxLines: 1,
@@ -1150,13 +1149,13 @@ class _FarmerOrderCardState extends State<_FarmerOrderCard> {
                                 children: [
                                   Text(formattedPrice,
                                       style: GoogleFonts.poppins(
-                                          fontSize: 16,
+                                          fontSize: 18,
                                           fontWeight: FontWeight.bold,
                                           color: Colors.black87)),
                                   const SizedBox(width: 6),
                                   Text("•  $qty kg",
                                       style: GoogleFonts.poppins(
-                                          fontSize: 12,
+                                          fontSize: 13,
                                           fontWeight: FontWeight.w500,
                                           color: Colors.grey.shade600)),
                                 ],
@@ -1170,10 +1169,10 @@ class _FarmerOrderCardState extends State<_FarmerOrderCard> {
                 ),
                 const Divider(
                     height: 1, thickness: 1, color: Color(0xFFF0F0F0)),
-                Container(
-                  height: 60, // 🔒 Fixed
+                // 🚀 FOOTER
+                Padding(
                   padding:
-                      const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
@@ -1184,15 +1183,22 @@ class _FarmerOrderCardState extends State<_FarmerOrderCard> {
                             children: [
                               Text("Ordered: $orderDate",
                                   style: GoogleFonts.poppins(
-                                      fontSize: 11,
+                                      fontSize: 12,
                                       fontWeight: FontWeight.w600,
                                       color: Colors.grey.shade600)),
                               const SizedBox(height: 2),
-                              Text(orderIdDisplay,
-                                  style: GoogleFonts.jetBrainsMono(
-                                      fontSize: 10,
-                                      color: Colors.grey.shade400,
-                                      fontWeight: FontWeight.w500)),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 6, vertical: 2),
+                                decoration: BoxDecoration(
+                                    color: const Color(0xFFE3F2FD),
+                                    borderRadius: BorderRadius.circular(4)),
+                                child: Text(orderIdDisplay,
+                                    style: GoogleFonts.jetBrainsMono(
+                                        fontSize: 11,
+                                        color: const Color(0xFF1565C0),
+                                        fontWeight: FontWeight.w700)),
+                              ),
                             ],
                           ),
                         ),
@@ -1219,24 +1225,23 @@ class _FarmerOrderCardState extends State<_FarmerOrderCard> {
                                   ? BorderSide.none
                                   : BorderSide(color: Colors.grey.shade300),
                               elevation: 0,
-                              minimumSize: const Size(120, 36),
+                              minimumSize: const Size(120, 38),
                               shape: RoundedRectangleBorder(
                                   borderRadius: BorderRadius.circular(100)),
                               padding: const EdgeInsets.symmetric(
                                   horizontal: 16, vertical: 0)),
                           child: Text(
                             widget.tabType == 'active'
-                                ? "Manage Status"
-                                : "View Details",
+                                ? FarmerText.get(context, 'manage_status')
+                                : FarmerText.get(context, 'view_details'),
                             style: GoogleFonts.poppins(
                                 fontSize: 12, fontWeight: FontWeight.bold),
                           ),
                         )
                       ] else ...[
-                        // PENDING ACTION BUTTONS
                         Expanded(
                           child: SizedBox(
-                            height: 36,
+                            height: 38,
                             child: OutlinedButton(
                               onPressed: (_isAccepting || _isRejecting)
                                   ? null
@@ -1262,7 +1267,7 @@ class _FarmerOrderCardState extends State<_FarmerOrderCard> {
                                         width: 16,
                                         child: CircularProgressIndicator(
                                             strokeWidth: 2, color: Colors.red))
-                                    : Text("Reject",
+                                    : Text(FarmerText.get(context, 'reject'),
                                         key: const ValueKey('reject_btn'),
                                         style: GoogleFonts.poppins(
                                             fontWeight: FontWeight.bold,
@@ -1274,7 +1279,7 @@ class _FarmerOrderCardState extends State<_FarmerOrderCard> {
                         const SizedBox(width: 12),
                         Expanded(
                           child: SizedBox(
-                            height: 36,
+                            height: 38,
                             child: ElevatedButton(
                               onPressed: (_isAccepting || _isRejecting)
                                   ? null
@@ -1301,7 +1306,7 @@ class _FarmerOrderCardState extends State<_FarmerOrderCard> {
                                         child: CircularProgressIndicator(
                                             strokeWidth: 2,
                                             color: Colors.white))
-                                    : Text("Accept",
+                                    : Text(FarmerText.get(context, 'accept'),
                                         key: const ValueKey('accept_btn'),
                                         style: GoogleFonts.poppins(
                                             color: Colors.white,

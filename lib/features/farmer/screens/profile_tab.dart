@@ -1,21 +1,22 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import 'package:url_launcher/url_launcher.dart'; // 🚀 IMPORTED URL LAUNCHER FOR CALLS & RATING
 
-// ✅ LOCALIZATION IMPORTS
+// ✅ LOCALIZATION & PROVIDERS
 import 'package:agriyukt_app/features/farmer/farmer_translations.dart';
 import 'package:agriyukt_app/core/providers/language_provider.dart';
 
-// SCREEN IMPORTS
+// ✅ SCREEN IMPORTS
 import 'package:agriyukt_app/features/auth/screens/login_screen.dart';
 import 'package:agriyukt_app/features/farmer/screens/edit_profile_screen.dart';
 import 'package:agriyukt_app/features/common/screens/settings_screen.dart';
-import 'package:agriyukt_app/features/onboarding/screens/language_screen.dart';
 import 'package:agriyukt_app/features/common/screens/support_chat_screen.dart';
 import 'package:agriyukt_app/features/common/screens/invite_friend_screen.dart';
-import 'package:agriyukt_app/features/farmer/screens/farmer_wallet_screen.dart';
+import 'package:agriyukt_app/features/common/screens/wallet_screen.dart';
 
 class ProfileTab extends StatefulWidget {
   const ProfileTab({super.key});
@@ -28,14 +29,13 @@ class _ProfileTabState extends State<ProfileTab> {
   final _supabase = Supabase.instance.client;
   bool _isLoading = true;
   String _name = "Farmer";
-
-  // Internal status tracker
   String _internalStatus = "Pending";
+  Map<String, dynamic>? _profile;
 
-  // Theme Colors
-  final Color _primaryGreen = const Color(0xFF1B5E20);
-  final Color _lightGreen = const Color(0xFF4CAF50);
-  final Color _bgOffWhite = const Color(0xFFF5F7FA);
+  // 🎨 Unified Theme Colors (Farmer Green)
+  final Color _themeColor = const Color(0xFF1B5E20);
+  final Color _lightColor = const Color(0xFF4CAF50);
+  final Color _bgOffWhite = const Color(0xFFF4F6F8);
 
   @override
   void initState() {
@@ -43,10 +43,11 @@ class _ProfileTabState extends State<ProfileTab> {
     _fetchProfileData();
   }
 
-  // ✅ Helper for Localized Text
   String _text(String key) => FarmerText.get(context, key);
 
   Future<void> _fetchProfileData() async {
+    if (_name == "Farmer") setState(() => _isLoading = true);
+
     final user = _supabase.auth.currentUser;
     if (user != null) {
       try {
@@ -60,12 +61,12 @@ class _ProfileTabState extends State<ProfileTab> {
         if (mounted) {
           setState(() {
             if (data != null) {
+              _profile = data;
               String fName = data['first_name'] ?? '';
               String lName = data['last_name'] ?? '';
               _name = "$fName $lName".trim();
               if (_name.isEmpty) _name = "Farmer";
 
-              // ✅ ROBUST STATUS CHECK
               String dbStatus =
                   (data['verification_status'] ?? 'Pending').toString();
               String? frontUrl = data['aadhar_front_url'];
@@ -92,367 +93,614 @@ class _ProfileTabState extends State<ProfileTab> {
         debugPrint("Error fetching profile: $e");
         if (mounted) setState(() => _isLoading = false);
       }
+    } else {
+      if (mounted) _logout();
     }
   }
 
   String _getShortId() {
     final uid = _supabase.auth.currentUser?.id ?? "";
-    if (uid.length < 5) return "UNKNOWN";
-    return "#${uid.substring(0, 5).toUpperCase()}";
+    if (uid.length < 5) return "0000";
+    return uid.substring(0, 5).toUpperCase();
   }
 
   Future<void> _logout() async {
-    await _supabase.auth.signOut();
-    if (mounted) {
-      Navigator.pushAndRemoveUntil(
-        context,
-        MaterialPageRoute(builder: (_) => const LoginScreen()),
-        (route) => false,
-      );
+    HapticFeedback.mediumImpact();
+    final bool? confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: Colors.white,
+        title: Text(_text('logout'),
+            style: GoogleFonts.poppins(fontWeight: FontWeight.bold)),
+        content: Text("Are you sure you want to log out?",
+            style: GoogleFonts.poppins()),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: Text("Cancel",
+                  style: GoogleFonts.poppins(color: Colors.grey))),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red.shade700, elevation: 0),
+            child:
+                Text("Logout", style: GoogleFonts.poppins(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    try {
+      await _supabase.auth.signOut();
+      if (mounted) {
+        Navigator.pushAndRemoveUntil(
+            context,
+            MaterialPageRoute(builder: (_) => const LoginScreen()),
+            (route) => false);
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text("Logout failed. Check internet.",
+                style: GoogleFonts.poppins()),
+            backgroundColor: Colors.red));
+      }
     }
   }
 
-  @override
-  Widget build(BuildContext context) {
-    // ✅ Consumer ensures instant translation update
-    return Consumer<LanguageProvider>(
-      builder: (context, languageProvider, child) {
-        if (_isLoading) {
-          return Scaffold(
-            backgroundColor: _bgOffWhite,
-            body:
-                Center(child: CircularProgressIndicator(color: _primaryGreen)),
-          );
-        }
+  // ---------------------------------------------------------------------------
+  // 🌟 APP INFO & RATING LOGIC
+  // ---------------------------------------------------------------------------
+  Future<void> _rateApp() async {
+    HapticFeedback.mediumImpact();
+    // 🚀 LIVE PLAY STORE LINK
+    final Uri url = Uri.parse(
+        'https://play.google.com/store/apps/details?id=com.agriyukt.app');
 
-        final memberId = _getShortId();
+    try {
+      if (await canLaunchUrl(url)) {
+        await launchUrl(url, mode: LaunchMode.externalApplication);
+      } else {
+        throw "Could not launch store.";
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content:
+                Text("Could not open app store.", style: GoogleFonts.poppins()),
+            backgroundColor: Colors.red.shade700,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    }
+  }
 
-        return Scaffold(
-          backgroundColor: _bgOffWhite,
-          body: RefreshIndicator(
-            onRefresh: _fetchProfileData,
-            color: _primaryGreen,
-            child: SingleChildScrollView(
-              physics: const AlwaysScrollableScrollPhysics(
-                  parent: BouncingScrollPhysics()),
-              child: Column(
-                children: [
-                  // --- 1. HEADER SECTION ---
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.fromLTRB(24, 60, 24, 40),
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        colors: [_primaryGreen, _lightGreen],
-                        begin: Alignment.bottomLeft,
-                        end: Alignment.topRight,
-                      ),
-                      borderRadius: const BorderRadius.only(
-                        bottomLeft: Radius.circular(40),
-                        bottomRight: Radius.circular(40),
-                      ),
-                      boxShadow: [
-                        BoxShadow(
-                          color: _primaryGreen.withOpacity(0.3),
-                          blurRadius: 20,
-                          offset: const Offset(0, 10),
-                        )
-                      ],
-                    ),
-                    child: Row(
-                      children: [
-                        CircleAvatar(
-                          radius: 35,
-                          backgroundColor: Colors.white,
-                          child: Text(
-                              _name.isNotEmpty ? _name[0].toUpperCase() : "F",
-                              style: GoogleFonts.poppins(
-                                  color: _primaryGreen,
-                                  fontSize: 30,
-                                  fontWeight: FontWeight.bold)),
-                        ),
-                        const SizedBox(width: 16),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(_text('namaste'), // "Namaste"
-                                  style: GoogleFonts.poppins(
-                                      color: Colors.white70, fontSize: 14)),
-                              Text(
-                                _name,
-                                style: GoogleFonts.poppins(
-                                    color: Colors.white,
-                                    fontSize: 24,
-                                    fontWeight: FontWeight.bold),
-                              ),
-                              const SizedBox(height: 8),
+  Future<void> _openLink(String urlString) async {
+    HapticFeedback.lightImpact();
+    final Uri url = Uri.parse(urlString);
 
-                              // STATUS BADGE
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 8, vertical: 4),
-                                decoration: BoxDecoration(
-                                    color: _internalStatus == "Verified"
-                                        ? Colors.green
-                                        : (_internalStatus == "Under Review"
-                                            ? Colors.blue
-                                            : Colors.orange),
-                                    borderRadius: BorderRadius.circular(8)),
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Icon(
-                                        _internalStatus == "Verified"
-                                            ? Icons.verified
-                                            : Icons.hourglass_top,
-                                        color: Colors.white,
-                                        size: 14),
-                                    const SizedBox(width: 4),
-                                    // ✅ Localized Status Text
-                                    Text(
-                                        _internalStatus == "Verified"
-                                            ? _text('verified')
-                                            : (_internalStatus == "Under Review"
-                                                ? _text('under_review')
-                                                : _text('pending')),
-                                        style: GoogleFonts.poppins(
-                                            color: Colors.white,
-                                            fontSize: 10,
-                                            fontWeight: FontWeight.bold)),
-                                  ],
-                                ),
-                              ),
-                              const SizedBox(height: 8),
+    try {
+      if (await canLaunchUrl(url)) {
+        await launchUrl(url, mode: LaunchMode.externalApplication);
+      } else {
+        throw "Could not launch link.";
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text("Could not open link.", style: GoogleFonts.poppins()),
+            backgroundColor: Colors.red.shade700,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    }
+  }
 
-                              // ID COPY
-                              InkWell(
-                                onTap: () {
-                                  Clipboard.setData(
-                                      ClipboardData(text: memberId));
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(
-                                        content: Text("ID Copied!"),
-                                        duration: Duration(milliseconds: 800)),
-                                  );
-                                },
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 10, vertical: 4),
-                                  decoration: BoxDecoration(
-                                    color: Colors.white.withOpacity(0.2),
-                                    borderRadius: BorderRadius.circular(12),
-                                  ),
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      const Icon(Icons.fingerprint,
-                                          size: 12, color: Colors.white),
-                                      const SizedBox(width: 6),
-                                      Text(
-                                        "ID: $memberId",
-                                        style: GoogleFonts.poppins(
-                                            color: Colors.white,
-                                            fontWeight: FontWeight.bold,
-                                            fontSize: 12),
-                                      ),
-                                      const SizedBox(width: 6),
-                                      const Icon(Icons.copy,
-                                          size: 10, color: Colors.white70),
-                                    ],
-                                  ),
-                                ),
-                              )
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-
-                  const SizedBox(height: 25),
-
-                  // --- 2. QUICK ACTIONS ---
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 20),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(_text('quick_actions'), // "Quick Actions"
-                            style: GoogleFonts.poppins(
-                                fontSize: 18, fontWeight: FontWeight.bold)),
-                        const SizedBox(height: 15),
-                        GridView.count(
-                          shrinkWrap: true,
-                          physics: const NeverScrollableScrollPhysics(),
-                          crossAxisCount: 2,
-                          childAspectRatio: 1.5,
-                          mainAxisSpacing: 12,
-                          crossAxisSpacing: 12,
-                          children: [
-                            // ✅ EDIT PROFILE - Forces Refresh on Return
-                            _modernGridItem(
-                                icon: Icons.person_outline,
-                                title: _text('personal_details'),
-                                subtitle: _text('edit'),
-                                color: Colors.orange,
-                                onTap: () async {
-                                  await Navigator.push(
-                                      context,
-                                      MaterialPageRoute(
-                                          builder: (_) =>
-                                              const EditProfileScreen()));
-                                  // Refresh data immediately after return
-                                  if (context.mounted) {
-                                    setState(() => _isLoading = true);
-                                    _fetchProfileData();
-                                  }
-                                }),
-
-                            _modernGridItem(
-                                icon: Icons.translate,
-                                title: _text('language'),
-                                subtitle: "Eng / मराठी",
-                                color: Colors.purple,
-                                onTap: () => Navigator.push(
-                                    context,
-                                    MaterialPageRoute(
-                                        // ✅ FIXED: Using fromProfile: true
-                                        builder: (_) => const LanguageScreen(
-                                            fromProfile: true)))),
-
-                            _modernGridItem(
-                                icon: Icons.support_agent,
-                                title: _text('agribot'),
-                                subtitle: "24/7 Support",
-                                color: Colors.teal,
-                                onTap: () => Navigator.push(
-                                    context,
-                                    MaterialPageRoute(
-                                        builder: (_) => const SupportChatScreen(
-                                            role: 'farmer')))),
-
-                            _modernGridItem(
-                                icon: Icons.account_balance_wallet_outlined,
-                                title: _text('wallet'),
-                                subtitle: "Check balance",
-                                color: Colors.green,
-                                onTap: () => Navigator.push(
-                                    context,
-                                    MaterialPageRoute(
-                                        builder: (_) =>
-                                            const FarmerWalletScreen()))),
-                          ],
-                        ),
-
-                        const SizedBox(height: 25),
-
-                        // --- 3. MENU LIST ---
-                        Container(
-                          decoration: BoxDecoration(
-                              color: Colors.white,
-                              borderRadius: BorderRadius.circular(20)),
-                          child: Column(
-                            children: [
-                              _modernListOption(
-                                  icon: Icons.settings_outlined,
-                                  title: _text('settings'),
-                                  onTap: () => Navigator.push(
-                                      context,
-                                      MaterialPageRoute(
-                                          builder: (_) => SettingsScreen(
-                                              themeColor: _primaryGreen,
-                                              role: 'farmer')))),
-                              const Divider(height: 1, indent: 60),
-                              _modernListOption(
-                                  icon: Icons.share_outlined,
-                                  title: "Invite Friend",
-                                  onTap: () => Navigator.push(
-                                      context,
-                                      MaterialPageRoute(
-                                          builder: (_) =>
-                                              const InviteFriendScreen()))),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(height: 30),
-                        _buildLogoutButton(_text),
-                        const SizedBox(height: 40),
-                      ],
-                    ),
-                  ),
-                ],
+  void _showAboutApp() {
+    HapticFeedback.lightImpact();
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) {
+        return Container(
+          padding: const EdgeInsets.all(24),
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(32)),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 40,
+                height: 5,
+                margin: const EdgeInsets.only(bottom: 24),
+                decoration: BoxDecoration(
+                    color: Colors.grey.shade300,
+                    borderRadius: BorderRadius.circular(10)),
               ),
-            ),
+              Container(
+                height: 80,
+                width: 80,
+                decoration: BoxDecoration(
+                  color: _themeColor.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(24),
+                  border:
+                      Border.all(color: _themeColor.withOpacity(0.2), width: 2),
+                ),
+                child: Icon(Icons.eco_rounded, size: 40, color: _themeColor),
+              ),
+              const SizedBox(height: 16),
+              Text("AgriYukt",
+                  style: GoogleFonts.poppins(
+                      fontSize: 24,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.black87,
+                      letterSpacing: -0.5)),
+              Text("Version 1.0.0 (Production)",
+                  style: GoogleFonts.jetBrainsMono(
+                      fontSize: 12,
+                      color: Colors.grey.shade500,
+                      fontWeight: FontWeight.w600)),
+              const SizedBox(height: 24),
+              Text(
+                "Empowering farmers, buyers, and inspectors with a seamless, transparent, and technology-driven agricultural supply chain.",
+                textAlign: TextAlign.center,
+                style: GoogleFonts.poppins(
+                    fontSize: 14, color: Colors.grey.shade600, height: 1.6),
+              ),
+              const SizedBox(height: 32),
+
+              // 🚀 UPDATED GITHUB PAGES LINKS
+              _buildAboutLinkRow(
+                  Icons.description_outlined,
+                  "Terms of Service",
+                  () => _openLink(
+                      'https://agriyukt.github.io/agriyukt-legal/terms.html')),
+              const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 8),
+                  child: Divider(height: 1)),
+              _buildAboutLinkRow(
+                  Icons.privacy_tip_outlined,
+                  "Privacy Policy",
+                  () => _openLink(
+                      'https://agriyukt.github.io/agriyukt-legal/privacy.html')),
+
+              const SizedBox(height: 32),
+              Text("Made with ❤️ in India",
+                  style: GoogleFonts.poppins(
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.grey.shade400)),
+              SizedBox(height: MediaQuery.of(context).padding.bottom + 16),
+            ],
           ),
         );
       },
     );
   }
 
-  // --- HELPERS ---
-
-  Widget _modernGridItem(
-      {required IconData icon,
-      required String title,
-      required String subtitle,
-      required Color color,
-      required VoidCallback onTap}) {
+  Widget _buildAboutLinkRow(IconData icon, String title, VoidCallback onTap) {
     return InkWell(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(20),
-      child: Container(
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(20),
-            boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 5)]),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8.0),
+        child: Row(
           children: [
-            Icon(icon, color: color),
-            const Spacer(),
-            Text(title,
-                style: GoogleFonts.poppins(
-                    fontWeight: FontWeight.bold, fontSize: 14)),
-            Text(subtitle,
-                style: GoogleFonts.poppins(color: Colors.grey, fontSize: 11)),
+            Icon(icon, size: 20, color: Colors.grey.shade600),
+            const SizedBox(width: 12),
+            Expanded(
+                child: Text(title,
+                    style: GoogleFonts.poppins(
+                        fontSize: 14,
+                        color: Colors.black87,
+                        fontWeight: FontWeight.w500))),
+            Icon(Icons.arrow_forward_ios_rounded,
+                size: 14, color: Colors.grey.shade400),
           ],
         ),
       ),
     );
   }
 
-  Widget _modernListOption(
-      {required IconData icon,
-      required String title,
-      required VoidCallback onTap}) {
-    return ListTile(
-      onTap: onTap,
-      leading: Icon(icon, color: _primaryGreen),
-      title: Text(title,
-          style:
-              GoogleFonts.poppins(fontSize: 15, fontWeight: FontWeight.w600)),
-      trailing: const Icon(Icons.chevron_right, size: 20),
-    );
-  }
+  @override
+  Widget build(BuildContext context) {
+    Provider.of<LanguageProvider>(context);
 
-  Widget _buildLogoutButton(String Function(String) text) {
-    return SizedBox(
-      width: double.infinity,
-      child: OutlinedButton.icon(
-        onPressed: _logout,
-        icon: const Icon(Icons.logout, color: Colors.red),
-        label: Text(text('logout'),
+    if (_isLoading) {
+      return Scaffold(
+          backgroundColor: _bgOffWhite,
+          body: Center(child: CircularProgressIndicator(color: _themeColor)));
+    }
+
+    final memberId = _getShortId();
+
+    return Scaffold(
+      backgroundColor: _bgOffWhite,
+      appBar: AppBar(
+        backgroundColor: _bgOffWhite,
+        elevation: 0,
+        surfaceTintColor: Colors.transparent,
+        centerTitle: false,
+        title: Text("My Profile",
             style: GoogleFonts.poppins(
-                color: Colors.red, fontWeight: FontWeight.bold)),
-        style: OutlinedButton.styleFrom(
-            padding: const EdgeInsets.symmetric(vertical: 15),
-            side: BorderSide(color: Colors.red.shade200),
-            backgroundColor: Colors.red.shade50,
-            shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12))),
+                color: Colors.black87,
+                fontSize: 24,
+                fontWeight: FontWeight.bold)),
+      ),
+      body: RefreshIndicator(
+        onRefresh: _fetchProfileData,
+        color: _themeColor,
+        backgroundColor: Colors.white,
+        child: SingleChildScrollView(
+          physics: const AlwaysScrollableScrollPhysics(
+              parent: BouncingScrollPhysics()),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16.0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const SizedBox(height: 8),
+
+                // 1. DIGITAL ID CARD
+                _buildDigitalIdCard(memberId, "FRM", "F", "KYC Status"),
+                const SizedBox(height: 24),
+
+                // 2. ACCOUNT GROUP
+                _buildSectionTitle("Account"),
+                _buildMenuGroup([
+                  _buildMenuItem(
+                    icon: Icons.person_outline_rounded,
+                    title: _text('personal_details'),
+                    subtitle: "Update your profile & KYC documents",
+                    onTap: () async {
+                      await Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                              builder: (_) => const EditProfileScreen()));
+                      if (mounted) _fetchProfileData();
+                    },
+                  ),
+                  _buildDivider(),
+                  _buildMenuItem(
+                    icon: Icons.account_balance_wallet_outlined,
+                    title: "Bank Details",
+                    subtitle: "Manage your linked bank accounts",
+                    onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                            builder: (_) =>
+                                WalletScreen(themeColor: _themeColor))),
+                  ),
+                ]),
+                const SizedBox(height: 24),
+
+                // 3. SUPPORT & COMMUNITY
+                _buildSectionTitle("Support & Community"),
+                _buildMenuGroup([
+                  _buildMenuItem(
+                    icon: Icons.support_agent_rounded,
+                    title: _text('agribot'),
+                    subtitle: "24/7 intelligent assistant",
+                    iconColor: Colors.teal.shade600,
+                    onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                            builder: (_) =>
+                                const SupportChatScreen(role: 'farmer'))),
+                  ),
+                  _buildDivider(),
+                  _buildMenuItem(
+                    icon: Icons.card_giftcard_rounded,
+                    title: "Invite a Friend",
+                    subtitle: "Share AgriYukt and grow the community",
+                    iconColor: Colors.orange.shade600,
+                    onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                            builder: (_) => const InviteFriendScreen())),
+                  ),
+                ]),
+                const SizedBox(height: 24),
+
+                // 4. PREFERENCES
+                _buildSectionTitle("Preferences"),
+                _buildMenuGroup([
+                  _buildMenuItem(
+                    icon: Icons.settings_outlined,
+                    title: _text('settings'),
+                    subtitle: "Notifications, security & theme",
+                    onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                            builder: (_) => SettingsScreen(
+                                themeColor: _themeColor, role: 'farmer'))),
+                  ),
+                ]),
+                const SizedBox(height: 24),
+
+                // 🚀 5. APP INFO & RATING SECTION
+                _buildSectionTitle("App Info"),
+                _buildMenuGroup([
+                  _buildMenuItem(
+                    icon: Icons.star_border_rounded,
+                    title: "Rate Us",
+                    subtitle: "Love AgriYukt? Leave a review!",
+                    iconColor: Colors.amber.shade600,
+                    onTap: _rateApp,
+                  ),
+                  _buildDivider(),
+                  _buildMenuItem(
+                    icon: Icons.info_outline_rounded,
+                    title: "About App",
+                    subtitle: "Version, Terms & Privacy",
+                    iconColor: _themeColor,
+                    onTap: _showAboutApp,
+                  ),
+                ]),
+                const SizedBox(height: 32),
+
+                // 6. LOGOUT BUTTON
+                _buildLogoutButton(),
+                _buildVersionFooter(),
+                const SizedBox(height: 40),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
+
+  // --- UNIFIED UI BUILDERS ---
+  Widget _buildDigitalIdCard(String memberId, String prefix,
+      String defaultLetter, String statusLabel) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+            colors: [_themeColor, _lightColor],
+            begin: Alignment.bottomLeft,
+            end: Alignment.topRight),
+        borderRadius: BorderRadius.circular(24),
+        boxShadow: [
+          BoxShadow(
+              color: _themeColor.withOpacity(0.3),
+              blurRadius: 20,
+              offset: const Offset(0, 8))
+        ],
+      ),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              CircleAvatar(
+                radius: 35,
+                backgroundColor: Colors.white,
+                child: Text(
+                    _name.isNotEmpty ? _name[0].toUpperCase() : defaultLetter,
+                    style: GoogleFonts.poppins(
+                        color: _themeColor,
+                        fontSize: 28,
+                        fontWeight: FontWeight.bold)),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text("${_text('namaste')} 👋",
+                        style: GoogleFonts.poppins(
+                            color: Colors.white70, fontSize: 14)),
+                    Text(_name,
+                        style: GoogleFonts.poppins(
+                            color: Colors.white,
+                            fontSize: 22,
+                            fontWeight: FontWeight.bold),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis),
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        Text("$prefix-$memberId",
+                            style: GoogleFonts.jetBrainsMono(
+                                color: Colors.white.withOpacity(0.9),
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600)),
+                        const SizedBox(width: 8),
+                        GestureDetector(
+                          onTap: () {
+                            HapticFeedback.selectionClick();
+                            Clipboard.setData(
+                                ClipboardData(text: "$prefix-$memberId"));
+                            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                                content: Text("ID Copied!",
+                                    style: GoogleFonts.poppins()),
+                                duration: const Duration(milliseconds: 1000),
+                                behavior: SnackBarBehavior.floating));
+                          },
+                          child: Container(
+                              padding: const EdgeInsets.all(4),
+                              decoration: BoxDecoration(
+                                  color: Colors.white.withOpacity(0.2),
+                                  shape: BoxShape.circle),
+                              child: const Icon(Icons.copy,
+                                  size: 12, color: Colors.white)),
+                        )
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const Padding(
+              padding: EdgeInsets.symmetric(vertical: 16),
+              child: Divider(color: Colors.white24, height: 1)),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(statusLabel,
+                  style: GoogleFonts.poppins(
+                      color: Colors.white.withOpacity(0.9),
+                      fontSize: 13,
+                      fontWeight: FontWeight.w500)),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                    color: _internalStatus == "Verified"
+                        ? Colors.white
+                        : (_internalStatus == "Under Review"
+                            ? Colors.blue.shade50
+                            : Colors.orange.shade50),
+                    borderRadius: BorderRadius.circular(20)),
+                child: Row(
+                  children: [
+                    Icon(
+                        _internalStatus == "Verified"
+                            ? Icons.verified_rounded
+                            : (_internalStatus == "Under Review"
+                                ? Icons.hourglass_top_rounded
+                                : Icons.error_outline_rounded),
+                        size: 14,
+                        color: _internalStatus == "Verified"
+                            ? Colors.green.shade700
+                            : (_internalStatus == "Under Review"
+                                ? Colors.blue.shade700
+                                : Colors.orange.shade800)),
+                    const SizedBox(width: 4),
+                    Text(
+                        _internalStatus == "Verified"
+                            ? _text('verified').toUpperCase()
+                            : (_internalStatus == "Under Review"
+                                ? _text('under_review').toUpperCase()
+                                : _text('pending').toUpperCase()),
+                        style: GoogleFonts.poppins(
+                            color: _internalStatus == "Verified"
+                                ? Colors.green.shade700
+                                : (_internalStatus == "Under Review"
+                                    ? Colors.blue.shade700
+                                    : Colors.orange.shade800),
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: 0.5)),
+                  ],
+                ),
+              )
+            ],
+          )
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSectionTitle(String title) => Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Text(title,
+          style: GoogleFonts.poppins(
+              fontSize: 13,
+              fontWeight: FontWeight.bold,
+              color: Colors.grey.shade600,
+              letterSpacing: 1)));
+
+  Widget _buildMenuGroup(List<Widget> children) => Container(
+      decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: Colors.grey.shade200),
+          boxShadow: [
+            BoxShadow(
+                color: Colors.black.withOpacity(0.02),
+                blurRadius: 10,
+                offset: const Offset(0, 4))
+          ]),
+      child: Column(children: children));
+
+  Widget _buildMenuItem(
+      {required IconData icon,
+      required String title,
+      required String subtitle,
+      required VoidCallback onTap,
+      Color? iconColor}) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: () {
+          HapticFeedback.lightImpact();
+          onTap();
+        },
+        borderRadius: BorderRadius.circular(20),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+          child: Row(
+            children: [
+              Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                      color: (iconColor ?? _themeColor).withOpacity(0.1),
+                      shape: BoxShape.circle),
+                  child: Icon(icon, color: iconColor ?? _themeColor, size: 22)),
+              const SizedBox(width: 16),
+              Expanded(
+                  child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                    Text(title,
+                        style: GoogleFonts.poppins(
+                            fontSize: 15,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.black87)),
+                    Text(subtitle,
+                        style: GoogleFonts.poppins(
+                            fontSize: 12,
+                            color: Colors.grey.shade500,
+                            fontWeight: FontWeight.w500))
+                  ])),
+              Icon(Icons.chevron_right_rounded, color: Colors.grey.shade400),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDivider() => Padding(
+      padding: const EdgeInsets.only(left: 60, right: 16),
+      child: Divider(height: 1, thickness: 1, color: Colors.grey.shade100));
+
+  Widget _buildLogoutButton() => SizedBox(
+      width: double.infinity,
+      height: 54,
+      child: OutlinedButton.icon(
+          onPressed: _logout,
+          icon: Icon(Icons.logout_rounded, color: Colors.red.shade700),
+          label: Text(_text('logout'),
+              style: GoogleFonts.poppins(
+                  color: Colors.red.shade700,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 16)),
+          style: OutlinedButton.styleFrom(
+              side: BorderSide(color: Colors.red.shade200, width: 1.5),
+              backgroundColor: Colors.red.shade50,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16)))));
+
+  Widget _buildVersionFooter() => Padding(
+      padding: const EdgeInsets.symmetric(vertical: 24),
+      child: Center(
+          child: Text("AgriYukt Version 1.0.0",
+              style: GoogleFonts.poppins(
+                  color: Colors.grey.shade400,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w500))));
 }

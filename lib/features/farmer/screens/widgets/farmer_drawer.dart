@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart'; // 🚀 Added for Haptics
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:google_fonts/google_fonts.dart';
 
@@ -12,7 +13,6 @@ import 'package:agriyukt_app/features/common/screens/settings_screen.dart';
 import 'package:agriyukt_app/features/farmer/screens/orders_screen.dart';
 import 'package:agriyukt_app/features/farmer/screens/profile_tab.dart';
 import 'package:agriyukt_app/features/common/screens/support_screens.dart';
-import 'package:agriyukt_app/features/common/screens/wallet_screen.dart';
 
 class FarmerDrawer extends StatefulWidget {
   final Function(int)? onTabChange;
@@ -27,7 +27,6 @@ class _FarmerDrawerState extends State<FarmerDrawer> {
   final _supabase = Supabase.instance.client;
   String _userName = "Farmer";
   String _shortId = "0000";
-  String _email = "";
 
   final Color _primaryGreen = const Color(0xFF1B5E20);
 
@@ -52,8 +51,10 @@ class _FarmerDrawerState extends State<FarmerDrawer> {
 
         if (mounted) {
           setState(() {
-            _email = user.email ?? "";
-            _shortId = user.id.substring(0, 4).toUpperCase();
+            _shortId = user.id.length > 4
+                ? user.id.substring(0, 4).toUpperCase()
+                : "0000";
+
             if (data != null) {
               _userName =
                   "${data['first_name'] ?? ''} ${data['last_name'] ?? ''}"
@@ -69,6 +70,7 @@ class _FarmerDrawerState extends State<FarmerDrawer> {
   }
 
   void _navigate(int tabIndex, Widget? screen) {
+    HapticFeedback.selectionClick(); // 🚀 Micro-Polish
     Navigator.pop(context);
     if (widget.onTabChange != null) {
       widget.onTabChange!(tabIndex);
@@ -77,116 +79,225 @@ class _FarmerDrawerState extends State<FarmerDrawer> {
     }
   }
 
+  // 🚀 PRODUCTION: Secure Logout with Confirmation
+  Future<void> _handleLogout() async {
+    HapticFeedback.mediumImpact();
+
+    final bool? confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(_text('logout'),
+            style: GoogleFonts.poppins(fontWeight: FontWeight.bold)),
+        content: Text("Are you sure you want to log out of AgriYukt?",
+            style: GoogleFonts.poppins()),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child:
+                Text("Cancel", style: GoogleFonts.poppins(color: Colors.grey)),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            child:
+                Text("Logout", style: GoogleFonts.poppins(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    try {
+      await _supabase.auth.signOut();
+      if (mounted) {
+        Navigator.pushAndRemoveUntil(
+            context,
+            MaterialPageRoute(builder: (_) => const LoginScreen()),
+            (route) => false);
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content:
+              Text("Logout failed. Try again.", style: GoogleFonts.poppins()),
+          backgroundColor: Colors.red,
+        ));
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Drawer(
       backgroundColor: Colors.white,
+      surfaceTintColor: Colors.transparent,
       child: Column(
         children: [
-          // --- HEADER ---
-          InkWell(
-            onTap: () => _navigate(3, const ProfileTab()),
-            child: Container(
-              width: double.infinity,
-              padding: const EdgeInsets.fromLTRB(20, 50, 20, 20),
-              decoration: BoxDecoration(color: _primaryGreen),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  CircleAvatar(
-                    radius: 30,
-                    backgroundColor: Colors.white,
-                    child: Text(
-                      _userName.isNotEmpty ? _userName[0].toUpperCase() : "F",
-                      style: GoogleFonts.poppins(
-                          fontSize: 26,
-                          fontWeight: FontWeight.bold,
-                          color: _primaryGreen),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  // ✅ LOCALIZED ("Namaste, Name")
-                  Text("${_text('namaste')}, $_userName",
-                      style: GoogleFonts.poppins(
-                          color: Colors.white,
-                          fontSize: 20,
-                          fontWeight: FontWeight.w600),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis),
-                  const SizedBox(height: 4),
-                  Text("ID: AGRI-$_shortId",
-                      style: GoogleFonts.poppins(
-                          color: Colors.white70, fontSize: 12)),
+          // ==========================================
+          // 1. CRISP PREMIUM HEADER
+          // ==========================================
+          Container(
+            width: double.infinity,
+            padding: EdgeInsets.fromLTRB(
+                20, MediaQuery.of(context).padding.top + 20, 20, 30),
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  Color(0xFF4CAF50), // Lighter Green
+                  Color(0xFF1B5E20), // Deep Green
                 ],
               ),
+              borderRadius: BorderRadius.only(
+                bottomLeft: Radius.circular(24),
+                bottomRight: Radius.circular(24),
+              ),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                // 🌟 Clean Glowing Avatar Ring
+                Container(
+                  padding: const EdgeInsets.all(3),
+                  decoration: const BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: LinearGradient(
+                      colors: [
+                        Colors.lightGreenAccent,
+                        Colors.greenAccent,
+                        Colors.tealAccent,
+                      ],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                    ),
+                  ),
+                  child: Container(
+                    padding: const EdgeInsets.all(2),
+                    decoration: const BoxDecoration(
+                      color: Color(0xFF1B5E20), // Inner dark background
+                      shape: BoxShape.circle,
+                    ),
+                    child: CircleAvatar(
+                      radius: 32,
+                      backgroundColor: Colors.transparent,
+                      child: Text(
+                        _userName.isNotEmpty ? _userName[0].toUpperCase() : "F",
+                        style: GoogleFonts.poppins(
+                          fontSize: 28,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 16),
+
+                // 📝 User Info
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        "${_text('namaste')} 👋",
+                        style: GoogleFonts.poppins(
+                          color: Colors.white,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      Text(
+                        _userName,
+                        style: GoogleFonts.poppins(
+                          color: Colors.white,
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                          height: 1.2,
+                        ),
+                        maxLines: 2, // Allows long names to wrap elegantly
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 8),
+                      // 🆔 Crisp ID Pill
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: Colors.white
+                              .withOpacity(0.2), // Clean translucent
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Text(
+                          "ID: FRM-$_shortId",
+                          style: GoogleFonts.poppins(
+                            color: Colors.white,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            letterSpacing: 0.5,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ),
           ),
 
-          // --- MENU ITEMS ---
+          // ==========================================
+          // 2. MENU ITEMS
+          // ==========================================
           Expanded(
             child: ListView(
-              padding: const EdgeInsets.symmetric(vertical: 12),
+              padding: const EdgeInsets.symmetric(vertical: 10),
+              physics: const BouncingScrollPhysics(),
               children: [
-                // 1. My Profile
-                _drawerItem(Icons.person_outline, _text('profile'), () {
-                  // ✅ LOCALIZED
+                _drawerItem(Icons.person_outline, _text('My Profile'), () {
                   _navigate(3, const ProfileTab());
                 }),
+                const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+                  child: Divider(thickness: 0.5, color: Color(0xFFE0E0E0)),
+                ),
 
-                // 2. Dashboard
-                _drawerItem(Icons.dashboard_outlined, _text('dashboard'), () {
-                  // ✅ LOCALIZED
+                // 🚀 UPDATED: Now uses proper home icon
+                _drawerItem(Icons.home_outlined, _text('Home'), () {
                   _navigate(0, null);
                 }),
 
-                // 3. Add New Crop (Bold & Colored)
-                _drawerItem(Icons.add_circle_outline, _text('add_crop'), () {
-                  // ✅ LOCALIZED
+                _drawerItem(Icons.add_circle_outline, _text('Add Crop'), () {
+                  HapticFeedback.selectionClick();
                   Navigator.pop(context);
                   Navigator.push(context,
                       MaterialPageRoute(builder: (_) => const AddCropScreen()));
                 }, color: _primaryGreen, isBold: true),
-
-                // 4. Active Crops (Goes to Inventory Tab)
-                _drawerItem(Icons.grass_outlined, _text('my_crops'), () {
-                  // ✅ LOCALIZED
+                _drawerItem(Icons.grass_outlined, _text('My Crops'), () {
                   _navigate(1, null);
                 }),
-
-                // 5. My Orders
-                _drawerItem(Icons.shopping_bag_outlined, _text('orders'), () {
-                  // ✅ LOCALIZED
+                _drawerItem(Icons.shopping_bag_outlined, _text('Orders'), () {
                   _navigate(2, const OrdersScreen());
                 }),
 
-                // 6. My Wallet
-                _drawerItem(Icons.account_balance_wallet_outlined,
-                    _text('wallet'), // ✅ LOCALIZED
-                    () {
-                  Navigator.pop(context);
-                  Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                          builder: (_) =>
-                              WalletScreen(themeColor: _primaryGreen)));
-                }),
+                // 🚀 REMOVED: Bank Details Section Removed
 
-                const Divider(),
-
-                // 7. Settings
-                _drawerItem(Icons.settings_outlined, _text('settings'), () {
-                  // ✅ LOCALIZED
+                const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+                  child: Divider(thickness: 0.5, color: Color(0xFFE0E0E0)),
+                ),
+                _drawerItem(Icons.settings_outlined, _text('Settings'), () {
+                  HapticFeedback.selectionClick();
                   Navigator.pop(context);
                   Navigator.push(
                       context,
                       MaterialPageRoute(
                           builder: (_) => SettingsScreen(
-                              themeColor: _primaryGreen, role: 'farmer')));
+                              themeColor: _primaryGreen, role: 'Farmer')));
                 }),
-
-                // 8. Help & Support
-                _drawerItem(Icons.help_outline, _text('help_support'), () {
-                  // ✅ LOCALIZED (Mapped to AgriBot/Support)
+                _drawerItem(Icons.support_agent, _text('Help & Support'), () {
+                  HapticFeedback.selectionClick();
                   Navigator.pop(context);
                   Navigator.push(
                       context,
@@ -198,30 +309,34 @@ class _FarmerDrawerState extends State<FarmerDrawer> {
             ),
           ),
 
-          // --- 9. LOGOUT (With Safe Area) ---
+          // ==========================================
+          // 3. PREMIUM LOGOUT BUTTON
+          // ==========================================
           SafeArea(
-            top: false, // Only add padding for bottom (navigation bar)
-            child: Column(
-              children: [
-                const Divider(height: 1),
-                ListTile(
-                  leading: const Icon(Icons.logout, color: Colors.red),
-                  title: Text(_text('logout'), // ✅ LOCALIZED
-                      style: GoogleFonts.poppins(
-                          color: Colors.red, fontWeight: FontWeight.bold)),
-                  onTap: () async {
-                    await _supabase.auth.signOut();
-                    if (context.mounted) {
-                      Navigator.pushAndRemoveUntil(
-                          context,
-                          MaterialPageRoute(
-                              builder: (_) => const LoginScreen()),
-                          (route) => false);
-                    }
-                  },
+            bottom: true,
+            child: Container(
+              margin: const EdgeInsets.fromLTRB(20, 10, 20, 24),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFF0F0), // Very light red
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: ListTile(
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16)),
+                leading: Icon(Icons.logout_rounded,
+                    color: Colors.red.shade700, size: 24),
+                title: Text(
+                  _text('Logout'),
+                  style: GoogleFonts.poppins(
+                    color: Colors.red.shade700,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16,
+                  ),
                 ),
-                const SizedBox(height: 10), // Extra breathing room
-              ],
+                trailing: Icon(Icons.chevron_right_rounded,
+                    color: Colors.red.shade700, size: 24),
+                onTap: _handleLogout,
+              ),
             ),
           ),
         ],
@@ -229,15 +344,25 @@ class _FarmerDrawerState extends State<FarmerDrawer> {
     );
   }
 
+  // --- Helper Widget for Menu Items ---
   Widget _drawerItem(IconData icon, String text, VoidCallback onTap,
       {Color color = Colors.black87, bool isBold = false}) {
     return ListTile(
-      leading: Icon(icon, color: color),
-      title: Text(text,
-          style: GoogleFonts.poppins(
-              color: color,
-              fontWeight: isBold ? FontWeight.bold : FontWeight.w500)),
-      onTap: onTap,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 2),
+      visualDensity: VisualDensity.compact,
+      leading: Icon(icon, color: color, size: 26),
+      title: Text(
+        text,
+        style: GoogleFonts.poppins(
+          color: color,
+          fontSize: 16,
+          fontWeight: isBold ? FontWeight.bold : FontWeight.w600,
+        ),
+      ),
+      onTap: () {
+        HapticFeedback.selectionClick();
+        onTap();
+      },
     );
   }
 }

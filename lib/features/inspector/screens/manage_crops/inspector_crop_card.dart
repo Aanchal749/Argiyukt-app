@@ -83,9 +83,12 @@ class InspectorCropCard extends StatelessWidget {
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+              color:
+                  Colors.grey.shade200), // Added subtle border for premium feel
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withOpacity(0.06),
+              color: Colors.black.withOpacity(0.04),
               blurRadius: 10,
               offset: const Offset(0, 4),
             ),
@@ -93,6 +96,8 @@ class InspectorCropCard extends StatelessWidget {
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize:
+              MainAxisSize.min, // 🔒 FLUID GEOMETRY: Prevents overflow
           children: [
             Stack(
               children: [
@@ -104,7 +109,7 @@ class InspectorCropCard extends StatelessWidget {
                     child: Container(
                       height: 180,
                       width: double.infinity,
-                      color: Colors.grey[200],
+                      color: Colors.grey[100],
                       child: Material(
                         color: Colors.transparent,
                         child: InkWell(
@@ -121,7 +126,7 @@ class InspectorCropCard extends StatelessWidget {
                   child: Tooltip(
                     message: _text(context, 'delete', fallback: "Delete"),
                     child: Material(
-                      color: Colors.white,
+                      color: Colors.white.withOpacity(0.9),
                       shape: const CircleBorder(),
                       elevation: 2,
                       shadowColor: Colors.black12,
@@ -129,11 +134,11 @@ class InspectorCropCard extends StatelessWidget {
                         onTap: onDeleteTap,
                         customBorder: const CircleBorder(),
                         child: Container(
-                          width: 44,
-                          height: 44,
+                          width: 40,
+                          height: 40,
                           alignment: Alignment.center,
                           child: Icon(Icons.delete_outline,
-                              color: Colors.red.shade700, size: 22),
+                              color: Colors.red.shade600, size: 20),
                         ),
                       ),
                     ),
@@ -146,7 +151,7 @@ class InspectorCropCard extends StatelessWidget {
                     padding:
                         const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                     decoration: BoxDecoration(
-                        color: statusColor.withOpacity(0.9),
+                        color: statusColor.withOpacity(0.95),
                         borderRadius: BorderRadius.circular(20),
                         boxShadow: const [
                           BoxShadow(
@@ -173,9 +178,11 @@ class InspectorCropCard extends StatelessWidget {
               padding: const EdgeInsets.all(16.0),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min, // 🔒 FLUID GEOMETRY
                 children: [
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Expanded(
                         child: Text(
@@ -184,22 +191,20 @@ class InspectorCropCard extends StatelessWidget {
                               fontSize: 18,
                               fontWeight: FontWeight.bold,
                               color: Colors.black87),
-                          maxLines: 1,
+                          maxLines:
+                              2, // 🔒 Gives text room to breathe if localized string is long
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
                       const SizedBox(width: 8),
-                      Flexible(
-                        child: Text(
-                          price,
-                          style: GoogleFonts.poppins(
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold,
-                              color:
-                                  _inspectorColor), // ✅ Matches Inspector Purple
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
+                      Text(
+                        price,
+                        style: GoogleFonts.poppins(
+                            fontSize: 18, // Slightly larger for emphasis
+                            fontWeight: FontWeight.bold,
+                            color:
+                                _inspectorColor), // ✅ Matches Inspector Purple
+                        maxLines: 1,
                       ),
                     ],
                   ),
@@ -215,7 +220,7 @@ class InspectorCropCard extends StatelessWidget {
                       Icons.calendar_today,
                       "${_text(context, 'available', fallback: 'Available')}: $availableDate",
                       "Availability Date"),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: 20),
 
                   // Row 1: View & Edit Buttons
                   Row(
@@ -225,9 +230,11 @@ class InspectorCropCard extends StatelessWidget {
                           onPressed: onViewTap,
                           icon: const Icon(Icons.visibility,
                               size: 18, color: Colors.white),
-                          label: Text(_text(context, 'view', fallback: "View"),
+                          label: Text(
+                              _text(context, 'view', fallback: "View Details"),
                               style: GoogleFonts.poppins(
                                   color: Colors.white,
+                                  fontSize: 13,
                                   fontWeight: FontWeight.w600)),
                           style: ElevatedButton.styleFrom(
                             backgroundColor:
@@ -247,10 +254,12 @@ class InspectorCropCard extends StatelessWidget {
                               size: 18,
                               color:
                                   _inspectorColor), // ✅ Matches Inspector Purple
-                          label: Text(_text(context, 'edit', fallback: "Edit"),
+                          label: Text(
+                              _text(context, 'edit', fallback: "Edit/Verify"),
                               style: GoogleFonts.poppins(
                                   color:
                                       _inspectorColor, // ✅ Matches Inspector Purple
+                                  fontSize: 13,
                                   fontWeight: FontWeight.w600)),
                           style: OutlinedButton.styleFrom(
                             side: BorderSide(
@@ -305,7 +314,7 @@ class InspectorCropCard extends StatelessWidget {
     return Container(
         height: 180,
         width: double.infinity,
-        color: Colors.grey[200],
+        color: Colors.grey[100],
         child: Icon(Icons.grass, size: 50, color: Colors.grey.shade400));
   }
 
@@ -314,7 +323,7 @@ class InspectorCropCard extends StatelessWidget {
       label: "$semanticLabel: $text",
       child: Row(
         children: [
-          Icon(icon, size: 16, color: Colors.grey[600]),
+          Icon(icon, size: 16, color: Colors.grey[500]),
           const SizedBox(width: 8),
           Expanded(
               child: Text(text,

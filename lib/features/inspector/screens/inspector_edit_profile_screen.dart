@@ -1,12 +1,21 @@
 import 'dart:io';
-import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:image_cropper/image_cropper.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+
 import 'package:agriyukt_app/core/services/location_service.dart';
+
+extension StringCasingExtension on String {
+  String toCapitalized() =>
+      length > 0 ? '${this[0].toUpperCase()}${substring(1).toLowerCase()}' : '';
+  String toTitleCase() => replaceAll(RegExp(' +'), ' ')
+      .split(' ')
+      .map((str) => str.toCapitalized())
+      .join(' ');
+}
 
 class InspectorEditProfileScreen extends StatefulWidget {
   final Map<String, dynamic> profile;
@@ -19,29 +28,27 @@ class InspectorEditProfileScreen extends StatefulWidget {
 
 class _InspectorEditProfileScreenState
     extends State<InspectorEditProfileScreen> {
-  final _formKey = GlobalKey<FormState>();
   final _supabase = Supabase.instance.client;
-
-  // --- Services ---
+  final _formKey = GlobalKey<FormState>();
   final ImagePicker _picker = ImagePicker();
+
+  // 🚀 DEMO STABILITY: Using 'latin' to ensure it doesn't crash downloading language packs
   final TextRecognizer _textRecognizer =
       TextRecognizer(script: TextRecognitionScript.latin);
 
-  bool _isLoading = false;
+  bool _isLoading = true;
+  bool _isSaving = false;
+  bool _isDirty = false;
   bool _isScanning = false;
 
-  // --- 1. TEXT CONTROLLERS ---
-  late TextEditingController _idCtrl;
-  late TextEditingController _fnameCtrl;
-  late TextEditingController _mnameCtrl;
-  late TextEditingController _lnameCtrl;
-  late TextEditingController _phoneCtrl;
-  late TextEditingController _emailCtrl;
-  late TextEditingController _addrCtrl;
-  late TextEditingController _pinCtrl;
-  late TextEditingController _aadharTextCtrl;
+  final _idCtrl = TextEditingController();
+  final _fnameCtrl = TextEditingController();
+  final _mnameCtrl = TextEditingController();
+  final _lnameCtrl = TextEditingController();
+  final _phoneCtrl = TextEditingController();
+  final _emailCtrl = TextEditingController();
 
-  // --- 2. DROPDOWNS ---
+  final _empIdCtrl = TextEditingController();
   String? _selectedOrg;
   final List<String> _orgOptions = [
     'Govt Dept',
@@ -50,497 +57,737 @@ class _InspectorEditProfileScreenState
     'Other'
   ];
 
-  // --- 3. LOCATION STATE (Cascading) ---
-  String? _selectedStateId;
-  String? _selectedDistrictId;
-  String? _selectedTalukaId;
-  String? _selectedVillageId;
+  final _address1Ctrl = TextEditingController();
+  final _address2Ctrl = TextEditingController();
+  final _pinCtrl = TextEditingController();
+  final _aadharTextCtrl = TextEditingController();
 
-  List<LocalizedItem> _stateList = [];
-  List<LocalizedItem> _districtList = [];
-  List<LocalizedItem> _talukaList = [];
-  List<LocalizedItem> _villageList = [];
+  String? _selectedStateId,
+      _selectedDistrictId,
+      _selectedTalukaId,
+      _selectedVillageId;
+  List<LocalizedItem> _stateList = [],
+      _districtList = [],
+      _talukaList = [],
+      _villageList = [];
 
-  // --- 4. IDENTITY IMAGES ---
-  File? _frontImageFile;
-  File? _backImageFile;
-  String? _existingFrontUrl;
-  String? _existingBackUrl;
+  File? _selectedFrontImage, _selectedBackImage;
+  String? _existingFrontUrl, _existingBackUrl;
   bool _isVerified = false;
 
-  // --- THEME ---
-  final Color _inspectorColor = const Color(0xFF512DA8);
-  final Color _bgOffWhite = const Color(0xFFF8F9FC); // Premium Light Background
+  final Color _primaryPurple = const Color(0xFF512DA8);
+  final Color _bgOffWhite = const Color(0xFFF8F9FC);
 
   @override
   void initState() {
     super.initState();
-    _initializeData();
+    _loadStates();
+    _loadUserProfile();
   }
 
   @override
   void dispose() {
+    _idCtrl.dispose();
+    _fnameCtrl.dispose();
+    _mnameCtrl.dispose();
+    _lnameCtrl.dispose();
+    _phoneCtrl.dispose();
+    _emailCtrl.dispose();
+    _empIdCtrl.dispose();
+    _address1Ctrl.dispose();
+    _address2Ctrl.dispose();
+    _pinCtrl.dispose();
+    _aadharTextCtrl.dispose();
     _textRecognizer.close();
     super.dispose();
   }
 
-  // ===========================================================================
-  // 📥 INITIALIZATION
-  // ===========================================================================
-  void _initializeData() {
-    final p = widget.profile;
-    final user = _supabase.auth.currentUser;
-
-    String memberId = p['member_id'] ?? '';
-    if (memberId.isEmpty && user != null) {
-      memberId = "#${user.id.substring(0, 5).toUpperCase()}";
-    }
-    _idCtrl = TextEditingController(text: memberId);
-    _fnameCtrl = TextEditingController(text: p['first_name'] ?? '');
-    _mnameCtrl = TextEditingController(text: p['middle_name'] ?? '');
-    _lnameCtrl = TextEditingController(text: p['last_name'] ?? '');
-    _phoneCtrl = TextEditingController(text: p['phone'] ?? '');
-    _emailCtrl = TextEditingController(text: p['email'] ?? user?.email ?? '');
-
-    if (p['organization'] != null && _orgOptions.contains(p['organization'])) {
-      _selectedOrg = p['organization'];
-    }
-
-    _addrCtrl = TextEditingController(text: p['address_line_1'] ?? '');
-    _pinCtrl = TextEditingController(text: p['pincode'] ?? '');
-
-    _aadharTextCtrl = TextEditingController(text: p['aadhar_number'] ?? '');
-    _existingFrontUrl = p['aadhar_front_url'];
-    _existingBackUrl = p['aadhar_back_url'];
-
-    _isVerified = (_existingFrontUrl != null &&
-        _existingFrontUrl!.isNotEmpty &&
-        _existingBackUrl != null &&
-        _existingBackUrl!.isNotEmpty &&
-        _aadharTextCtrl.text.isNotEmpty);
-
-    _loadLocationHierarchy();
+  void _markDirty() {
+    if (!_isDirty) setState(() => _isDirty = true);
   }
 
-  void _loadLocationHierarchy() {
-    _stateList = LocationService.getStates();
-    final p = widget.profile;
+  void _loadStates() =>
+      setState(() => _stateList = LocationService.getStates());
 
-    _selectedStateId = p['state'];
-    if (_selectedStateId != null) {
-      _districtList = LocationService.getDistricts(_selectedStateId!);
-      if (_districtList.any((e) => e.id == p['district'])) {
-        _selectedDistrictId = p['district'];
-      }
-    }
-    if (_selectedStateId != null && _selectedDistrictId != null) {
-      _talukaList =
-          LocationService.getTalukas(_selectedStateId!, _selectedDistrictId!);
-      if (_talukaList.any((e) => e.id == p['taluka'])) {
-        _selectedTalukaId = p['taluka'];
-      }
-    }
-    if (_selectedStateId != null &&
-        _selectedDistrictId != null &&
-        _selectedTalukaId != null) {
-      _villageList = LocationService.getVillages(
-          _selectedStateId!, _selectedDistrictId!, _selectedTalukaId!);
-      if (_villageList.any((e) => e.id == p['village'])) {
-        _selectedVillageId = p['village'];
-      }
-    }
-    if (mounted) setState(() {});
-  }
-
-  // ===========================================================================
-  // 📸 IDENTITY LOGIC
-  // ===========================================================================
-
-  Future<void> _pickImage(bool isFront) async {
+  Future<void> _loadUserProfile() async {
     try {
-      final XFile? photo = await _picker.pickImage(
-          source: ImageSource.gallery, imageQuality: 90);
-      if (photo != null) {
-        await _cropImage(File(photo.path), isFront);
+      final user = _supabase.auth.currentUser;
+      if (user == null) return;
+
+      final data = await _supabase
+          .from('profiles')
+          .select()
+          .eq('id', user.id)
+          .maybeSingle();
+
+      if (data != null && mounted) {
+        setState(() {
+          _idCtrl.text = data['member_id']?.isNotEmpty == true
+              ? data['member_id']
+              : "#${user.id.substring(0, 5).toUpperCase()}";
+          _fnameCtrl.text = data['first_name'] ?? "";
+          _mnameCtrl.text = data['middle_name'] ?? "";
+          _lnameCtrl.text = data['last_name'] ?? "";
+          _phoneCtrl.text = data['phone'] ?? "";
+          _emailCtrl.text = data['email'] ?? user.email ?? "";
+
+          final meta = data['meta_data'] is Map ? data['meta_data'] : {};
+          _selectedOrg = _orgOptions.contains(meta['organization'])
+              ? meta['organization']
+              : null;
+          _empIdCtrl.text = meta['employee_id'] ?? "";
+          _address1Ctrl.text = meta['address_line_1'] ?? "";
+          _address2Ctrl.text = meta['address_line_2'] ?? "";
+          _selectedStateId = data['state'];
+          _pinCtrl.text = data['pincode'] ?? "";
+
+          String rawAadhar = data['aadhar_number'] ?? "";
+          _aadharTextCtrl.text = rawAadhar.length >= 12
+              ? "XXXX XXXX ${rawAadhar.substring(rawAadhar.length - 4)}"
+              : rawAadhar;
+
+          _existingFrontUrl = data['aadhar_front_url'];
+          _existingBackUrl = data['aadhar_back_url'];
+          _isVerified = (_existingFrontUrl?.isNotEmpty == true &&
+              _existingBackUrl?.isNotEmpty == true &&
+              rawAadhar.isNotEmpty);
+
+          if (_selectedStateId != null) {
+            _districtList = LocationService.getDistricts(_selectedStateId!);
+            if (_districtList.any((e) => e.id == data['district'])) {
+              _selectedDistrictId = data['district'];
+              _talukaList = LocationService.getTalukas(
+                  _selectedStateId!, _selectedDistrictId!);
+              if (_talukaList.any((e) => e.id == data['taluka'])) {
+                _selectedTalukaId = data['taluka'];
+                _villageList = LocationService.getVillages(_selectedStateId!,
+                    _selectedDistrictId!, _selectedTalukaId!);
+                if (_villageList.any((e) => e.id == data['village'])) {
+                  _selectedVillageId = data['village'];
+                }
+              }
+            }
+          }
+          _isLoading = false;
+        });
       }
     } catch (e) {
-      debugPrint("Pick Error: $e");
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
-  Future<void> _cropImage(File imageFile, bool isFront) async {
-    final croppedFile = await ImageCropper().cropImage(
-      sourcePath: imageFile.path,
-      uiSettings: [
-        AndroidUiSettings(
-          toolbarTitle: isFront ? 'Crop Front ID' : 'Crop Back ID',
-          toolbarColor: _inspectorColor,
-          toolbarWidgetColor: Colors.white,
-          initAspectRatio: CropAspectRatioPreset.ratio3x2,
-          lockAspectRatio: false,
-        ),
-        IOSUiSettings(title: 'Adjust ID Card', aspectRatioLockEnabled: false),
-      ],
-    );
-
-    if (croppedFile != null) {
-      File processedFile = File(croppedFile.path);
-      if (isFront) {
-        await _validateFrontSide(processedFile);
-      } else {
-        await _validateBackSide(processedFile);
-      }
-    }
-  }
-
-  Future<void> _validateFrontSide(File imageFile) async {
-    setState(() => _isScanning = true);
+  Future<void> _pickIdImage(bool isFront) async {
     try {
-      final inputImage = InputImage.fromFile(imageFile);
+      // 🚀 CRITICAL FIX: Stops the Android Out Of Memory (OOM) Crash instantly!
+      final XFile? file = await _picker.pickImage(
+        source: ImageSource.gallery,
+        imageQuality: 50,
+        maxWidth: 1200,
+        maxHeight: 1200,
+      );
+
+      if (file != null) {
+        File imageFile = File(file.path);
+
+        if (!mounted) return;
+        File? processedFile = await _showRotationDialog(imageFile);
+
+        if (processedFile != null) {
+          if (isFront) {
+            // 🛡️ THE GATEKEEPER
+            bool isStrictlyValid = await _scanAndValidateAadhar(processedFile);
+            if (isStrictlyValid && mounted) {
+              _markDirty();
+              HapticFeedback.lightImpact();
+              setState(() => _selectedFrontImage = processedFile);
+            }
+          } else {
+            if (mounted) {
+              _markDirty();
+              HapticFeedback.lightImpact();
+              setState(() => _selectedBackImage = processedFile);
+            }
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint("Image Error: $e");
+    }
+  }
+
+  Future<File?> _showRotationDialog(File file) async {
+    int rotationTurns = 0;
+    return await showDialog<File>(
+      context: context,
+      barrierDismissible: false,
+      builder: (c) => StatefulBuilder(builder: (context, setDialogState) {
+        return Scaffold(
+          backgroundColor: Colors.black,
+          appBar: AppBar(
+            backgroundColor: Colors.black,
+            title: Text("Align Identity Card",
+                style: GoogleFonts.poppins(color: Colors.white, fontSize: 16)),
+            leading: IconButton(
+                icon: const Icon(Icons.close, color: Colors.white),
+                onPressed: () => Navigator.pop(c)),
+          ),
+          body: Center(
+              child: RotatedBox(
+                  quarterTurns: rotationTurns,
+                  child: Image.file(file, fit: BoxFit.contain))),
+          bottomNavigationBar: SafeArea(
+            child: Container(
+              padding: const EdgeInsets.symmetric(vertical: 20),
+              color: Colors.black,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                          icon: const Icon(Icons.rotate_right,
+                              color: Colors.white, size: 35),
+                          onPressed: () => setDialogState(
+                              () => rotationTurns = (rotationTurns + 1) % 4)),
+                      Text("Rotate 90°",
+                          style: GoogleFonts.poppins(
+                              color: Colors.white, fontSize: 12)),
+                    ],
+                  ),
+                  Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                          icon: const Icon(Icons.check_circle,
+                              color: Colors.greenAccent, size: 45),
+                          onPressed: () => Navigator.pop(c, file)),
+                      Text("Confirm",
+                          style: GoogleFonts.poppins(
+                              color: Colors.white, fontSize: 12)),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      }),
+    );
+  }
+
+  // 🛡️ THE STRICT 3-POINT VALIDATION LOGIC
+  Future<bool> _scanAndValidateAadhar(File file) async {
+    setState(() => _isScanning = true);
+
+    String fName = _fnameCtrl.text.trim().toLowerCase();
+    String lName = _lnameCtrl.text.trim().toLowerCase();
+
+    if (fName.isEmpty || lName.isEmpty) {
+      _showSnack("Please fill your First and Last name before scanning.",
+          isError: true);
+      setState(() => _isScanning = false);
+      return false;
+    }
+
+    try {
+      final inputImage = InputImage.fromFile(file);
       final RecognizedText recognizedText =
           await _textRecognizer.processImage(inputImage);
-      RegExp aadharRegex = RegExp(r'(?<!\d)\d{4}\s?\d{4}\s?\d{4}(?!\d)');
+
+      String rawText = recognizedText.text.toLowerCase();
+      String rawTextNoSpaces = rawText.replaceAll(RegExp(r'\s+'), '');
+
+      // 1. Name Match Condition
+      bool hasName = rawText.contains(fName) && rawText.contains(lName);
+
+      // 2. Authority Check Condition
+      bool hasAuthority =
+          rawTextNoSpaces.contains("uniqueidentificationauthorityofindia") ||
+              rawText.contains("government of india");
+
+      // 3. 12/14-Character Number Check
+      RegExp aadharRegex = RegExp(r'\d{4}\s?\d{4}\s?\d{4}');
       RegExpMatch? match = aadharRegex.firstMatch(recognizedText.text);
+      bool hasNumber = match != null;
 
-      setState(() => _frontImageFile = imageFile);
+      // (Marathi disabled for demo stability so it doesn't crash trying to read unsupported font)
 
-      if (match != null) {
-        String idNumber = match.group(0)!.replaceAll(' ', '');
-        setState(() => _aadharTextCtrl.text = idNumber);
-        _showSuccess("Number Detected: $idNumber");
+      if (hasName && hasAuthority && hasNumber) {
+        if (mounted) {
+          setState(() {
+            _aadharTextCtrl.text = match.group(0)!.replaceAll(' ', '');
+          });
+        }
+        _showSnack("✅ Authentic Aadhaar Verified!", isError: false);
+        return true;
       } else {
-        _showWarning("Number not clear. Please type manually.");
+        String errors = "Invalid Document Detected:\n";
+        if (!hasName) errors += "❌ Name mismatch with input.\n";
+        if (!hasAuthority) errors += "❌ Missing Govt. of India Authority.\n";
+        if (!hasNumber) errors += "❌ No valid 12-digit number.\n";
+
+        if (mounted) _showStrictErrorDialog(errors.trim());
+        return false;
       }
     } catch (e) {
-      debugPrint("Scan Error: $e");
+      if (mounted)
+        _showSnack("Failed to scan document clearly. Please try again.",
+            isError: true);
+      return false;
     } finally {
-      setState(() => _isScanning = false);
+      if (mounted) setState(() => _isScanning = false);
     }
   }
 
-  Future<void> _validateBackSide(File imageFile) async {
-    setState(() => _backImageFile = imageFile);
-    _showSuccess("Back Side Selected");
+  void _showStrictErrorDialog(String errorMsg) {
+    HapticFeedback.heavyImpact();
+    showDialog(
+        context: context,
+        builder: (c) => AlertDialog(
+              title: Row(children: [
+                const Icon(Icons.warning_amber_rounded, color: Colors.red),
+                const SizedBox(width: 8),
+                Text("Verification Failed",
+                    style: GoogleFonts.poppins(
+                        fontWeight: FontWeight.bold, fontSize: 18))
+              ]),
+              content: Text(errorMsg, style: GoogleFonts.poppins(fontSize: 14)),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16)),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(c),
+                  child: Text("RETRY",
+                      style: GoogleFonts.poppins(
+                          color: _primaryPurple, fontWeight: FontWeight.bold)),
+                )
+              ],
+            ));
   }
 
   Future<String?> _uploadFile(File? file, String userId, String side) async {
     if (file == null) return null;
     try {
-      final time = DateTime.now().millisecondsSinceEpoch;
-      final path = '$userId/${side}_$time.jpg';
-      await _supabase.storage.from('verification_docs').upload(path, file);
+      final path =
+          'id_proofs/$userId/${side}_${DateTime.now().millisecondsSinceEpoch}.jpg';
+      await _supabase.storage.from('verification_docs').uploadBinary(
+          path, await file.readAsBytes(),
+          fileOptions: const FileOptions(upsert: true));
       return _supabase.storage.from('verification_docs').getPublicUrl(path);
     } catch (e) {
-      debugPrint("Upload Error: $e");
       return null;
     }
   }
 
-  Future<void> _updateProfile() async {
-    if (!_formKey.currentState!.validate()) return;
-    if (_aadharTextCtrl.text.isEmpty) {
-      _showWarning("Missing Aadhar Number. Please verify identity.");
+  Future<void> _saveChanges() async {
+    if (_isSaving) return;
+    if (!_formKey.currentState!.validate()) {
+      HapticFeedback.vibrate();
       return;
     }
 
-    setState(() => _isLoading = true);
-
+    setState(() => _isSaving = true);
     try {
       final user = _supabase.auth.currentUser;
-      if (user != null) {
-        String? frontUrl = await _uploadFile(_frontImageFile, user.id, 'front');
-        String? backUrl = await _uploadFile(_backImageFile, user.id, 'back');
+      if (user == null) throw "Unauthorized";
 
-        String finalFrontUrl = frontUrl ?? _existingFrontUrl ?? '';
-        String finalBackUrl = backUrl ?? _existingBackUrl ?? '';
-        String status = (finalFrontUrl.isNotEmpty &&
-                finalBackUrl.isNotEmpty &&
-                _aadharTextCtrl.text.isNotEmpty)
-            ? 'Verified'
-            : 'Pending';
+      String? frontUrl =
+          await _uploadFile(_selectedFrontImage, user.id, 'front');
+      String? backUrl = await _uploadFile(_selectedBackImage, user.id, 'back');
 
-        final updates = {
-          'id': user.id,
-          'first_name': _fnameCtrl.text.trim(),
-          'middle_name': _mnameCtrl.text.trim(),
-          'last_name': _lnameCtrl.text.trim(),
-          'phone': _phoneCtrl.text.trim(),
-          'email': _emailCtrl.text.trim(),
+      String finalFrontUrl = frontUrl ?? _existingFrontUrl ?? '';
+      String finalBackUrl = backUrl ?? _existingBackUrl ?? '';
+
+      String aadharToSave = _aadharTextCtrl.text.replaceAll(' ', '');
+      if (aadharToSave.startsWith('X')) {
+        final existing = await _supabase
+            .from('profiles')
+            .select('aadhar_number')
+            .eq('id', user.id)
+            .single();
+        aadharToSave = existing['aadhar_number'] ?? '';
+      }
+
+      String status = (finalFrontUrl.isNotEmpty &&
+              finalBackUrl.isNotEmpty &&
+              aadharToSave.isNotEmpty)
+          ? 'Verified'
+          : 'Pending';
+
+      final Map<String, dynamic> updates = {
+        'first_name': _fnameCtrl.text.trim().toTitleCase(),
+        'middle_name': _mnameCtrl.text.trim().toTitleCase(),
+        'last_name': _lnameCtrl.text.trim().toTitleCase(),
+        'phone': _phoneCtrl.text.trim(),
+        'state': _selectedStateId,
+        'district': _selectedDistrictId,
+        'taluka': _selectedTalukaId,
+        'village': _selectedVillageId,
+        'pincode': _pinCtrl.text.trim(),
+        'meta_data': {
           'organization': _selectedOrg,
-          'state': _selectedStateId,
-          'district': _selectedDistrictId,
-          'taluka': _selectedTalukaId,
-          'village': _selectedVillageId,
-          'address_line_1': _addrCtrl.text.trim(),
-          'pincode': _pinCtrl.text.trim(),
-          'aadhar_number': _aadharTextCtrl.text.trim(),
-          'aadhar_front_url': finalFrontUrl,
-          'aadhar_back_url': finalBackUrl,
-          'verification_status': status,
-          'updated_at': DateTime.now().toIso8601String(),
-        };
+          'employee_id': _empIdCtrl.text.trim().toUpperCase(),
+          'address_line_1': _address1Ctrl.text.trim(),
+          'address_line_2': _address2Ctrl.text.trim(),
+        },
+        'aadhar_number': aadharToSave,
+        'aadhar_front_url': finalFrontUrl,
+        'aadhar_back_url': finalBackUrl,
+        'verification_status': status,
+        'updated_at': DateTime.now().toIso8601String(),
+      };
 
-        await _supabase.from('profiles').upsert(updates);
+      await _supabase.from('profiles').update(updates).eq('id', user.id);
 
-        if (mounted) {
-          _showSuccess("✅ Profile Updated Successfully!");
-          Navigator.pop(context, true);
-        }
+      if (mounted) {
+        setState(() => _isDirty = false);
+        HapticFeedback.mediumImpact();
+        _showSuccessOverlay(context);
       }
     } catch (e) {
-      if (mounted)
-        ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text("Error: $e"), backgroundColor: Colors.red));
+      if (mounted) {
+        HapticFeedback.vibrate();
+        _showSnack("Sync Failed. Please try again.", isError: true);
+      }
     } finally {
-      if (mounted) setState(() => _isLoading = false);
+      if (mounted) setState(() => _isSaving = false);
     }
   }
 
-  void _showSuccess(String msg) => ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(msg), backgroundColor: Colors.green));
-  void _showWarning(String msg) => ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(msg), backgroundColor: Colors.orange));
+  void _showSnack(String msg, {bool isError = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(msg, style: GoogleFonts.poppins()),
+        backgroundColor: isError ? Colors.red : Colors.green));
+  }
 
-  // ===========================================================================
-  // 🎨 UI BUILD
-  // ===========================================================================
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: _bgOffWhite,
-      appBar: AppBar(
-        title: Text("Edit Profile",
-            style: GoogleFonts.poppins(fontWeight: FontWeight.bold)),
-        backgroundColor: _inspectorColor,
-        foregroundColor: Colors.white,
-        elevation: 0,
+  void _showSuccessOverlay(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      isDismissible: false,
+      enableDrag: false,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(25))),
+      builder: (context) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.check_circle, color: Colors.green, size: 70),
+            const SizedBox(height: 16),
+            Text("Profile Synchronized",
+                style: GoogleFonts.poppins(
+                    fontSize: 20, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            Text("Your secure Inspector profile has been updated.",
+                textAlign: TextAlign.center,
+                style: GoogleFonts.poppins(color: Colors.grey.shade600)),
+            const SizedBox(height: 24),
+            SizedBox(
+                width: double.infinity,
+                height: 50,
+                child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                        backgroundColor: _primaryPurple,
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12))),
+                    onPressed: () {
+                      Navigator.pop(context);
+                      Navigator.pop(context, true);
+                    },
+                    child: const Text("CONTINUE",
+                        style: TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16))))
+          ],
+        ),
       ),
-      body: _isLoading
-          ? Center(child: CircularProgressIndicator(color: _inspectorColor))
-          : SingleChildScrollView(
-              padding: const EdgeInsets.all(20),
-              child: Form(
-                key: _formKey,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // 1. PERSONAL INFO
-                    _sectionHeader("Personal Details", Icons.person_pin),
-                    _buildShadowInput("Member ID", _idCtrl, Icons.badge,
-                        isReadOnly: true),
-                    const SizedBox(height: 12),
-                    Row(
-                      children: [
-                        Expanded(
-                            child: _buildShadowInput(
-                                "First Name", _fnameCtrl, Icons.person,
-                                isRequired: true)),
-                        const SizedBox(width: 12),
-                        Expanded(
-                            child: _buildShadowInput("Middle Name", _mnameCtrl,
-                                Icons.person_outline)),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                    _buildShadowInput("Last Name", _lnameCtrl, Icons.person,
-                        isRequired: true),
-                    const SizedBox(height: 12),
-                    _buildShadowInput("Mobile Number", _phoneCtrl, Icons.phone,
-                        isNumber: true, isRequired: true),
-                    const SizedBox(height: 12),
-                    _buildShadowInput("Email Address", _emailCtrl, Icons.email,
-                        isReadOnly: true),
-
-                    const SizedBox(height: 28),
-
-                    // 2. PROFESSIONAL
-                    _sectionHeader("Professional Info", Icons.work),
-                    _buildShadowDropdown("Organization", _selectedOrg,
-                        _orgOptions, (v) => setState(() => _selectedOrg = v)),
-
-                    const SizedBox(height: 28),
-
-                    // 3. LOCATION
-                    _sectionHeader("Location & Address", Icons.map),
-                    _buildLocationDropdown(
-                        "State", _selectedStateId, _stateList, (val) {
-                      setState(() {
-                        _selectedStateId = val;
-                        _districtList = LocationService.getDistricts(val!);
-                        _selectedDistrictId = null;
-                        _talukaList = [];
-                        _villageList = [];
-                      });
-                    }),
-                    const SizedBox(height: 12),
-                    _buildLocationDropdown(
-                        "District", _selectedDistrictId, _districtList, (val) {
-                      setState(() {
-                        _selectedDistrictId = val;
-                        _talukaList =
-                            LocationService.getTalukas(_selectedStateId!, val!);
-                        _selectedTalukaId = null;
-                        _villageList = [];
-                      });
-                    }),
-                    const SizedBox(height: 12),
-                    _buildLocationDropdown(
-                        "Taluka", _selectedTalukaId, _talukaList, (val) {
-                      setState(() {
-                        _selectedTalukaId = val;
-                        _villageList = LocationService.getVillages(
-                            _selectedStateId!, _selectedDistrictId!, val!);
-                        _selectedVillageId = null;
-                      });
-                    }),
-                    const SizedBox(height: 12),
-                    _buildLocationDropdown(
-                        "Village",
-                        _selectedVillageId,
-                        _villageList,
-                        (val) => setState(() => _selectedVillageId = val)),
-                    const SizedBox(height: 12),
-                    _buildShadowInput(
-                        "Address / Landmark", _addrCtrl, Icons.home),
-                    const SizedBox(height: 12),
-                    _buildShadowInput("Pincode", _pinCtrl, Icons.pin_drop,
-                        isNumber: true),
-
-                    const SizedBox(height: 28),
-
-                    // 4. IDENTITY
-                    _buildIdentitySection(),
-
-                    const SizedBox(height: 40),
-
-                    // SAVE BUTTON
-                    SizedBox(
-                      width: double.infinity,
-                      height: 55,
-                      child: ElevatedButton(
-                        onPressed: _updateProfile,
-                        style: ElevatedButton.styleFrom(
-                            backgroundColor: _inspectorColor,
-                            shadowColor: _inspectorColor.withOpacity(0.4),
-                            elevation: 8,
-                            shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(16))),
-                        child: Text("SAVE CHANGES",
-                            style: GoogleFonts.poppins(
-                                color: Colors.white,
-                                fontSize: 18,
-                                fontWeight: FontWeight.bold)),
-                      ),
-                    ),
-                    const SizedBox(height: 30),
-                  ],
-                ),
-              ),
-            ),
     );
   }
 
-  // ===========================================================================
-  // 🧱 PREMIUM WIDGETS
-  // ===========================================================================
+  Future<bool?> _showExitDialog() {
+    return showDialog<bool>(
+        context: context,
+        builder: (c) => AlertDialog(
+                title: const Text("Discard Changes?"),
+                content: const Text("Any unsaved changes will be lost."),
+                actions: [
+                  TextButton(
+                      onPressed: () => Navigator.pop(c, false),
+                      child: const Text("Stay")),
+                  TextButton(
+                      onPressed: () => Navigator.pop(c, true),
+                      child: const Text("Discard",
+                          style: TextStyle(color: Colors.red)))
+                ]));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return WillPopScope(
+      onWillPop: () async {
+        if (_isSaving) return false;
+        if (!_isDirty) return true;
+        final res = await _showExitDialog();
+        return res ?? false;
+      },
+      child: Scaffold(
+        backgroundColor: _bgOffWhite,
+        appBar: AppBar(
+            title: Text("Edit Inspector Profile",
+                style: GoogleFonts.poppins(fontWeight: FontWeight.bold)),
+            backgroundColor: _primaryPurple,
+            foregroundColor: Colors.white,
+            elevation: 0),
+        body: _isLoading
+            ? Center(child: CircularProgressIndicator(color: _primaryPurple))
+            : SingleChildScrollView(
+                physics: const BouncingScrollPhysics(),
+                padding: const EdgeInsets.all(20),
+                child: Form(
+                  key: _formKey,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _sectionHeader("Personal Info", Icons.person_pin),
+                      _buildShadowInput("Member ID", _idCtrl, Icons.badge,
+                          isReadOnly: true),
+                      const SizedBox(height: 12),
+                      Row(children: [
+                        Expanded(
+                            child: _buildShadowInput(
+                                "First Name", _fnameCtrl, Icons.person,
+                                isRequired: true, isAlphaOnly: true)),
+                        const SizedBox(width: 12),
+                        Expanded(
+                            child: _buildShadowInput(
+                                "Middle Name", _mnameCtrl, Icons.person_outline,
+                                isAlphaOnly: true)),
+                      ]),
+                      const SizedBox(height: 12),
+                      _buildShadowInput("Last Name", _lnameCtrl, Icons.person,
+                          isRequired: true, isAlphaOnly: true),
+                      const SizedBox(height: 12),
+                      _buildShadowInput(
+                          "Mobile Number", _phoneCtrl, Icons.phone,
+                          isNumber: true, isRequired: true, maxLength: 10),
+                      const SizedBox(height: 12),
+                      _buildShadowInput(
+                          "Email Address", _emailCtrl, Icons.email,
+                          isReadOnly: true),
+                      const SizedBox(height: 28),
+                      _sectionHeader("Professional Details", Icons.work),
+                      _buildShadowDropdown(
+                          "Organization", _selectedOrg, _orgOptions, (v) {
+                        _markDirty();
+                        setState(() => _selectedOrg = v);
+                      }),
+                      const SizedBox(height: 12),
+                      _buildShadowInput(
+                          "Employee ID", _empIdCtrl, Icons.badge_outlined),
+                      const SizedBox(height: 28),
+                      _sectionHeader("Location & Address", Icons.map),
+                      _buildLocationDropdown(
+                          "State", _selectedStateId, _stateList, (val) {
+                        _markDirty();
+                        setState(() {
+                          _selectedStateId = val;
+                          _districtList = LocationService.getDistricts(val!);
+                          _selectedDistrictId =
+                              _selectedTalukaId = _selectedVillageId = null;
+                          _talukaList = _villageList = [];
+                        });
+                      }),
+                      const SizedBox(height: 12),
+                      _buildLocationDropdown(
+                          "District", _selectedDistrictId, _districtList,
+                          (val) {
+                        _markDirty();
+                        setState(() {
+                          _selectedDistrictId = val;
+                          _talukaList = LocationService.getTalukas(
+                              _selectedStateId!, val!);
+                          _selectedTalukaId = _selectedVillageId = null;
+                          _villageList = [];
+                        });
+                      }),
+                      const SizedBox(height: 12),
+                      _buildLocationDropdown(
+                          LocationService.isUrban(_selectedDistrictId ?? "")
+                              ? "Ward"
+                              : "Taluka",
+                          _selectedTalukaId,
+                          _talukaList, (val) {
+                        _markDirty();
+                        setState(() {
+                          _selectedTalukaId = val;
+                          _villageList = LocationService.getVillages(
+                              _selectedStateId!, _selectedDistrictId!, val!);
+                          _selectedVillageId = null;
+                        });
+                      }),
+                      const SizedBox(height: 12),
+                      _buildLocationDropdown(
+                          LocationService.isUrban(_selectedDistrictId ?? "")
+                              ? "Locality"
+                              : "Village",
+                          _selectedVillageId,
+                          _villageList, (val) {
+                        _markDirty();
+                        setState(() => _selectedVillageId = val);
+                      }),
+                      const SizedBox(height: 12),
+                      _buildShadowInput(
+                          "Address Line 1", _address1Ctrl, Icons.home,
+                          isRequired: true),
+                      const SizedBox(height: 12),
+                      _buildShadowInput(
+                          "Address Line 2", _address2Ctrl, Icons.home_work),
+                      const SizedBox(height: 12),
+                      _buildShadowInput("Pincode", _pinCtrl, Icons.pin_drop,
+                          isNumber: true, maxLength: 6, isRequired: true),
+                      const SizedBox(height: 28),
+                      _sectionHeader("Verification", Icons.verified_user),
+                      Container(
+                        padding: const EdgeInsets.all(20),
+                        decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(20),
+                            boxShadow: [
+                              BoxShadow(
+                                  color: Colors.grey.withOpacity(0.1),
+                                  blurRadius: 10,
+                                  offset: const Offset(0, 4))
+                            ]),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Text("Strict Identity Verification",
+                                    style: GoogleFonts.poppins(
+                                        fontSize: 15,
+                                        fontWeight: FontWeight.w600,
+                                        color: _primaryPurple)),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 10, vertical: 4),
+                                  decoration: BoxDecoration(
+                                      color: _isVerified
+                                          ? Colors.green.withOpacity(0.1)
+                                          : Colors.orange.withOpacity(0.1),
+                                      borderRadius: BorderRadius.circular(8),
+                                      border: Border.all(
+                                          color: _isVerified
+                                              ? Colors.green
+                                              : Colors.orange)),
+                                  child: Text(
+                                      _isVerified ? "Verified" : "Pending",
+                                      style: GoogleFonts.poppins(
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.bold,
+                                          color: _isVerified
+                                              ? Colors.green
+                                              : Colors.orange)),
+                                )
+                              ],
+                            ),
+                            const SizedBox(height: 15),
+                            Text("Aadhaar Front (MUST Match Name)",
+                                style: GoogleFonts.poppins(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.red.shade800)),
+                            const SizedBox(height: 8),
+                            _buildDocumentUploadBox(true),
+                            const SizedBox(height: 15),
+                            Text("Aadhaar Back",
+                                style: GoogleFonts.poppins(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w500,
+                                    color: Colors.grey.shade600)),
+                            const SizedBox(height: 8),
+                            _buildDocumentUploadBox(false),
+                            const SizedBox(height: 20),
+                            // 🚀 FIX: Made Aadhaar text read only so user can't fake it!
+                            _buildShadowInput("Aadhar Number", _aadharTextCtrl,
+                                Icons.fingerprint,
+                                isNumber: true,
+                                isRequired: true,
+                                maxLength: 12,
+                                isReadOnly: true),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 40),
+                      SizedBox(
+                        width: double.infinity,
+                        height: 55,
+                        child: ElevatedButton(
+                          onPressed: _isSaving ? null : _saveChanges,
+                          style: ElevatedButton.styleFrom(
+                              backgroundColor: _primaryPurple,
+                              shadowColor: _primaryPurple.withOpacity(0.4),
+                              elevation: 8,
+                              shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(16))),
+                          child: _isSaving
+                              ? const CircularProgressIndicator(
+                                  color: Colors.white)
+                              : Text("SAVE CHANGES",
+                                  style: GoogleFonts.poppins(
+                                      color: Colors.white,
+                                      fontSize: 18,
+                                      fontWeight: FontWeight.bold)),
+                        ),
+                      ),
+                      const SizedBox(height: 30),
+                    ],
+                  ),
+                ),
+              ),
+      ),
+    );
+  }
 
   Widget _sectionHeader(String title, IconData icon) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 15),
-      child: Row(
-        children: [
-          Container(
-              height: 24,
-              width: 4,
-              decoration: BoxDecoration(
-                  color: _inspectorColor,
-                  borderRadius: BorderRadius.circular(2))),
-          const SizedBox(width: 8),
-          Icon(icon, size: 20, color: _inspectorColor),
-          const SizedBox(width: 8),
-          Text(title,
-              style: GoogleFonts.poppins(
-                  fontSize: 18,
-                  fontWeight: FontWeight.w700,
-                  color: Colors.black87)),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildIdentitySection() {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(20),
-          boxShadow: [
-            BoxShadow(
-                color: Colors.grey.withOpacity(0.1),
-                blurRadius: 10,
-                offset: const Offset(0, 4))
-          ]),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text("Identity Proof",
-                  style: GoogleFonts.poppins(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
-                      color: _inspectorColor)),
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                decoration: BoxDecoration(
-                    color: _isVerified
-                        ? Colors.green.withOpacity(0.1)
-                        : Colors.orange.withOpacity(0.1),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(
-                        color: _isVerified ? Colors.green : Colors.orange,
-                        width: 1)),
-                child: Text(_isVerified ? "Verified" : "Pending",
-                    style: GoogleFonts.poppins(
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold,
-                        color: _isVerified ? Colors.green : Colors.orange)),
-              )
-            ],
-          ),
-          const SizedBox(height: 15),
-          Text("Aadhaar Card (Front)",
-              style: GoogleFonts.poppins(
-                  fontWeight: FontWeight.w500,
-                  fontSize: 13,
-                  color: Colors.grey.shade600)),
-          const SizedBox(height: 8),
-          _buildModernUploadBox(true),
-          const SizedBox(height: 15),
-          Text("Aadhaar Card (Back)",
-              style: GoogleFonts.poppins(
-                  fontWeight: FontWeight.w500,
-                  fontSize: 13,
-                  color: Colors.grey.shade600)),
-          const SizedBox(height: 8),
-          _buildModernUploadBox(false),
-          const SizedBox(height: 15),
-          _buildShadowInput("Aadhar Number", _aadharTextCtrl, Icons.fingerprint,
-              isNumber: true, isRequired: true),
-        ],
-      ),
+      child: Row(children: [
+        Container(
+            height: 24,
+            width: 4,
+            decoration: BoxDecoration(
+                color: _primaryPurple, borderRadius: BorderRadius.circular(2))),
+        const SizedBox(width: 8),
+        Icon(icon, size: 20, color: _primaryPurple),
+        const SizedBox(width: 8),
+        Text(title,
+            style: GoogleFonts.poppins(
+                fontSize: 18,
+                fontWeight: FontWeight.w700,
+                color: Colors.black87))
+      ]),
     );
   }
 
   Widget _buildShadowInput(
       String label, TextEditingController ctrl, IconData icon,
       {bool isNumber = false,
+      bool isAlphaOnly = false,
       bool isReadOnly = false,
-      bool isRequired = false}) {
+      bool isRequired = false,
+      int? maxLength}) {
+    List<TextInputFormatter> formatters = [];
+    if (isNumber) formatters.add(FilteringTextInputFormatter.digitsOnly);
+    if (isAlphaOnly)
+      formatters.add(FilteringTextInputFormatter.allow(RegExp(r'[a-zA-Z\s]')));
+    if (maxLength != null)
+      formatters.add(LengthLimitingTextInputFormatter(maxLength));
+
     return Container(
       decoration: BoxDecoration(
           color: Colors.white,
@@ -553,29 +800,34 @@ class _InspectorEditProfileScreenState
           ]),
       child: TextFormField(
         controller: ctrl,
-        keyboardType: isNumber ? TextInputType.number : TextInputType.text,
         readOnly: isReadOnly,
+        onChanged: (_) => _markDirty(),
+        textInputAction: TextInputAction.next,
+        keyboardType: isNumber ? TextInputType.number : TextInputType.text,
+        inputFormatters: formatters,
         validator: (v) {
-          if (isReadOnly) return null;
           if (isRequired && (v == null || v.trim().isEmpty))
             return "$label is required";
+          if (isNumber &&
+              maxLength != null &&
+              v!.length < maxLength &&
+              !v.startsWith('X')) return "Invalid length";
           return null;
         },
-        style: GoogleFonts.poppins(fontSize: 15, fontWeight: FontWeight.w500),
+        style: GoogleFonts.poppins(fontSize: 15),
         decoration: InputDecoration(
-          labelText: label,
-          labelStyle:
-              GoogleFonts.poppins(color: Colors.grey.shade500, fontSize: 13),
-          prefixIcon:
-              Icon(icon, color: _inspectorColor.withOpacity(0.7), size: 20),
-          border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(14),
-              borderSide: BorderSide.none),
-          filled: true,
-          fillColor: isReadOnly ? Colors.grey.shade50 : Colors.white,
-          contentPadding:
-              const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-        ),
+            labelText: label,
+            labelStyle:
+                GoogleFonts.poppins(color: Colors.grey.shade500, fontSize: 13),
+            prefixIcon:
+                Icon(icon, color: _primaryPurple.withOpacity(0.7), size: 20),
+            border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(14),
+                borderSide: BorderSide.none),
+            filled: true,
+            fillColor: isReadOnly ? Colors.grey.shade50 : Colors.white,
+            contentPadding:
+                const EdgeInsets.symmetric(horizontal: 16, vertical: 14)),
       ),
     );
   }
@@ -594,6 +846,7 @@ class _InspectorEditProfileScreenState
           ]),
       child: DropdownButtonFormField<String>(
         value: value,
+        validator: (v) => v == null ? "Please select $label" : null,
         items: items
             .map((e) => DropdownMenuItem(
                 value: e,
@@ -604,8 +857,8 @@ class _InspectorEditProfileScreenState
             labelText: label,
             labelStyle:
                 GoogleFonts.poppins(color: Colors.grey.shade500, fontSize: 13),
-            prefixIcon: Icon(Icons.business,
-                color: _inspectorColor.withOpacity(0.7), size: 20),
+            prefixIcon: Icon(Icons.arrow_drop_down_circle,
+                color: _primaryPurple.withOpacity(0.7), size: 20),
             border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(14),
                 borderSide: BorderSide.none),
@@ -630,10 +883,11 @@ class _InspectorEditProfileScreenState
       child: DropdownButtonFormField<String>(
         value: value,
         isExpanded: true,
+        validator: (v) => v == null ? "Please select $label" : null,
         items: items
             .map((e) => DropdownMenuItem(
                 value: e.id,
-                child: Text(e.nameEn,
+                child: Text(e.getName(false),
                     overflow: TextOverflow.ellipsis,
                     style: GoogleFonts.poppins(fontSize: 15))))
             .toList(),
@@ -643,7 +897,7 @@ class _InspectorEditProfileScreenState
             labelStyle:
                 GoogleFonts.poppins(color: Colors.grey.shade500, fontSize: 13),
             prefixIcon: Icon(Icons.map_outlined,
-                color: _inspectorColor.withOpacity(0.7), size: 20),
+                color: _primaryPurple.withOpacity(0.7), size: 20),
             border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(14),
                 borderSide: BorderSide.none),
@@ -653,82 +907,80 @@ class _InspectorEditProfileScreenState
     );
   }
 
-  Widget _buildModernUploadBox(bool isFront) {
-    File? file = isFront ? _frontImageFile : _backImageFile;
+  Widget _buildDocumentUploadBox(bool isFront) {
+    File? file = isFront ? _selectedFrontImage : _selectedBackImage;
     String? existingUrl = isFront ? _existingFrontUrl : _existingBackUrl;
     bool hasImage =
         file != null || (existingUrl != null && existingUrl.isNotEmpty);
 
     if (hasImage) {
       return Container(
-        height: 150,
+        height: 160,
         width: double.infinity,
         decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: Colors.grey.shade200),
-          image: file != null
-              ? DecorationImage(image: FileImage(file), fit: BoxFit.cover)
-              : DecorationImage(
-                  image: NetworkImage(existingUrl!), fit: BoxFit.cover),
-        ),
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: Colors.grey.shade200)),
         child: Stack(
+          alignment: Alignment.center,
           children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(16),
+              child: file != null
+                  ? Image.file(file, fit: BoxFit.cover, width: double.infinity)
+                  : Image.network(existingUrl!,
+                      fit: BoxFit.cover,
+                      width: double.infinity,
+                      loadingBuilder: (context, child, p) {
+                        if (p == null) return child;
+                        return Center(
+                            child: CircularProgressIndicator(
+                                color: _primaryPurple));
+                      },
+                      errorBuilder: (c, e, s) => const Center(
+                          child: Icon(Icons.broken_image, color: Colors.grey))),
+            ),
             if (_isScanning && isFront)
               Container(
                   decoration: BoxDecoration(
-                      color: Colors.black45,
+                      color: Colors.black54,
                       borderRadius: BorderRadius.circular(16)),
                   child: const Center(
                       child: CircularProgressIndicator(color: Colors.white))),
             Positioned(
-              right: 10,
-              bottom: 10,
-              child: InkWell(
-                onTap: () => _pickImage(isFront),
-                child: CircleAvatar(
-                    backgroundColor: Colors.white,
-                    radius: 18,
-                    child: Icon(Icons.edit, size: 18, color: Colors.black87)),
-              ),
-            )
+                right: 10,
+                bottom: 10,
+                child: InkWell(
+                    onTap: () => _pickIdImage(isFront),
+                    child: const CircleAvatar(
+                        backgroundColor: Colors.white,
+                        radius: 18,
+                        child:
+                            Icon(Icons.edit, size: 18, color: Colors.black87))))
           ],
         ),
       );
     }
-
     return InkWell(
-      onTap: () => _pickImage(isFront),
+      onTap: () => _pickIdImage(isFront),
       borderRadius: BorderRadius.circular(16),
       child: Container(
-        height: 150,
+        height: 160,
         width: double.infinity,
         decoration: BoxDecoration(
-          color: const Color(0xFFF2F4F7),
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: Colors.grey.shade300, width: 1.5),
-        ),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            if (_isScanning && isFront) ...[
-              const CircularProgressIndicator(),
-              const SizedBox(height: 8),
-              Text("Scanning...",
-                  style:
-                      GoogleFonts.poppins(fontSize: 12, color: _inspectorColor))
-            ] else ...[
-              Icon(Icons.add_a_photo_rounded,
-                  size: 36, color: Colors.grey.shade400),
-              const SizedBox(height: 8),
-              Text("Tap to Upload",
-                  style: GoogleFonts.poppins(
-                      color: Colors.grey.shade600,
-                      fontWeight: FontWeight.w600,
-                      fontSize: 13))
-            ]
-          ],
-        ),
+            color: const Color(0xFFF2F4F7),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: Colors.grey.shade300, width: 1.5)),
+        child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+          Icon(Icons.cloud_upload_outlined,
+              size: 36, color: Colors.grey.shade400),
+          const SizedBox(height: 8),
+          Text("Tap to Upload ${isFront ? 'Front' : 'Back'}",
+              style: GoogleFonts.poppins(
+                  color: Colors.grey.shade600,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 13))
+        ]),
       ),
     );
   }

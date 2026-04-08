@@ -1,14 +1,13 @@
 import 'dart:io';
-import 'dart:async'; // 🛡️ Required for Timeouts
+import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart'; // 🔬 Required for strict input formatters
+import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:uuid/uuid.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:image_cropper/image_cropper.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+import 'package:google_fonts/google_fonts.dart';
 
-// ✅ ACTIVE: Using your actual Location Service
 import 'package:agriyukt_app/core/services/location_service.dart';
 
 class AddFarmerScreen extends StatefulWidget {
@@ -27,8 +26,9 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
   bool _isProcessingImage = false;
   bool _isSubmitting = false;
 
-  // 🛡️ Persistent OCR Recognizer
-  final TextRecognizer _textRecognizer = TextRecognizer();
+  // 🛡️ STABILITY: Using 'latin' to ensure 100% crash-free performance
+  final TextRecognizer _textRecognizer =
+      TextRecognizer(script: TextRecognitionScript.latin);
 
   // --- 1. PERSONAL CONTROLLERS ---
   final _firstNameCtrl = TextEditingController();
@@ -104,7 +104,7 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
     super.dispose();
   }
 
-  // --- IMAGE PICKER & OCR LOGIC ---
+  // --- 🚀 MEMORY-SAFE IMAGE PICKER & CAMERA BOTTOM SHEET ---
   Future<void> _pickImage(bool isFront) async {
     if (_isProcessingImage || _isSubmitting) return;
 
@@ -118,12 +118,14 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
           children: [
             ListTile(
               leading: Icon(Icons.camera_alt, color: _inspectorColor),
-              title: const Text('Take Photo'),
+              title: const Text('Take Photo',
+                  style: TextStyle(fontWeight: FontWeight.bold)),
               onTap: () => Navigator.pop(context, ImageSource.camera),
             ),
             ListTile(
               leading: Icon(Icons.photo_library, color: _inspectorColor),
-              title: const Text('Choose from Gallery'),
+              title: const Text('Choose from Gallery',
+                  style: TextStyle(fontWeight: FontWeight.bold)),
               onTap: () => Navigator.pop(context, ImageSource.gallery),
             ),
           ],
@@ -137,42 +139,33 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
       setState(() => _isProcessingImage = true);
 
       final picker = ImagePicker();
+      // 🚀 CRITICAL FIX: Memory safe limits to prevent OOM
       final img = await picker.pickImage(
-          source: source, imageQuality: 70, maxWidth: 1920);
+          source: source, imageQuality: 50, maxWidth: 1200, maxHeight: 1200);
 
       if (img == null) {
         setState(() => _isProcessingImage = false);
         return;
       }
 
-      CroppedFile? cropped = await ImageCropper().cropImage(
-        sourcePath: img.path,
-        uiSettings: [
-          AndroidUiSettings(
-            toolbarTitle: isFront ? 'Crop Front Side' : 'Crop Back Side',
-            toolbarColor: _inspectorColor,
-            toolbarWidgetColor: Colors.white,
-            initAspectRatio: CropAspectRatioPreset.ratio16x9,
-            lockAspectRatio: false,
-          ),
-          // 🔬 Micro-fix: Prevent fatal crashes on iOS devices
-          IOSUiSettings(
-            title: isFront ? 'Crop Front Side' : 'Crop Back Side',
-          ),
-        ],
-      );
+      File imageFile = File(img.path);
 
-      if (cropped != null) {
+      if (!mounted) return;
+      File? processedFile = await _showRotationDialog(imageFile);
+
+      if (processedFile != null) {
         setState(() {
           if (isFront) {
-            _frontImage = File(cropped.path);
-            _frontMsg = "Processing...";
+            _frontImage = processedFile;
+            _frontMsg = "⏳ Analyzing...";
           } else {
-            _backImage = File(cropped.path);
-            _backMsg = "Processing...";
+            _backImage = processedFile;
+            _backMsg = "⏳ Analyzing...";
           }
         });
-        await _processImage(File(cropped.path), isFront);
+
+        // 🛡️ SECURITY GATEKEEPER
+        await _scanAndValidateAadhar(processedFile, isFront);
       }
     } catch (e) {
       debugPrint("Image Error: $e");
@@ -186,62 +179,224 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
     }
   }
 
-  Future<void> _processImage(File image, bool isFront) async {
-    final input = InputImage.fromFile(image);
+  // 🚀 PURE FLUTTER ROTATION UI
+  Future<File?> _showRotationDialog(File file) async {
+    int rotationTurns = 0;
+    return await showDialog<File>(
+      context: context,
+      barrierDismissible: false,
+      builder: (c) => StatefulBuilder(builder: (context, setDialogState) {
+        return Scaffold(
+          backgroundColor: Colors.black,
+          appBar: AppBar(
+            backgroundColor: Colors.black,
+            title: Text("Align Identity Card",
+                style: GoogleFonts.poppins(color: Colors.white, fontSize: 16)),
+            leading: IconButton(
+                icon: const Icon(Icons.close, color: Colors.white),
+                onPressed: () => Navigator.pop(c)),
+          ),
+          body: Center(
+              child: RotatedBox(
+                  quarterTurns: rotationTurns,
+                  child: Image.file(file, fit: BoxFit.contain))),
+          bottomNavigationBar: SafeArea(
+            child: Container(
+              padding: const EdgeInsets.symmetric(vertical: 20),
+              color: Colors.black,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                          icon: const Icon(Icons.rotate_right,
+                              color: Colors.white, size: 35),
+                          onPressed: () => setDialogState(
+                              () => rotationTurns = (rotationTurns + 1) % 4)),
+                      Text("Rotate 90°",
+                          style: GoogleFonts.poppins(
+                              color: Colors.white, fontSize: 12)),
+                    ],
+                  ),
+                  Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                          icon: const Icon(Icons.check_circle,
+                              color: Colors.greenAccent, size: 45),
+                          onPressed: () => Navigator.pop(c, file)),
+                      Text("Confirm",
+                          style: GoogleFonts.poppins(
+                              color: Colors.white, fontSize: 12)),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      }),
+    );
+  }
+
+  // 🛡️ STRICT VALIDATION LOGIC
+  Future<void> _scanAndValidateAadhar(File file, bool isFront) async {
+    final inputImage = InputImage.fromFile(file);
 
     try {
-      final text = await _textRecognizer.processImage(input);
-      String fullText = text.text.toLowerCase().replaceAll("\n", " ");
+      final RecognizedText recognizedText =
+          await _textRecognizer.processImage(inputImage);
+      String fullText = recognizedText.text.toLowerCase().replaceAll("\n", " ");
+      String textNoSpaces = fullText.replaceAll(RegExp(r'\s+'), '');
 
       if (isFront) {
-        bool hasKeywords = fullText.contains("government") ||
-            fullText.contains("india") ||
-            fullText.contains("dob");
+        String fName = _firstNameCtrl.text.trim().toLowerCase();
+        String lName = _lastNameCtrl.text.trim().toLowerCase();
 
-        RegExp digitRegex = RegExp(r'[2-9][0-9]{3}\s?[0-9]{4}\s?[0-9]{4}');
-        var match = digitRegex.firstMatch(text.text);
-
-        if (mounted) {
+        if (fName.isEmpty || lName.isEmpty) {
+          HapticFeedback.vibrate();
           setState(() {
-            _isFrontValid = (match != null || hasKeywords);
-            _frontMsg =
-                _isFrontValid ? "✅ Valid ID Detected" : "❌ ID Unclear - Retake";
-            if (match != null) _extractedAadharNumber = match.group(0);
+            _isFrontValid = false;
+            _frontImage = null; // Reject image
+            _frontMsg = "❌ Enter Farmer Name above first!";
+          });
+          return;
+        }
+
+        bool hasName = fullText.contains(fName) && fullText.contains(lName);
+        bool hasAuthority =
+            textNoSpaces.contains("uniqueidentificationauthorityofindia") ||
+                fullText.contains("government of india");
+
+        RegExp aadharRegex = RegExp(r'\d{4}\s?\d{4}\s?\d{4}');
+        RegExpMatch? match = aadharRegex.firstMatch(recognizedText.text);
+        bool hasNumber = match != null;
+
+        if (hasName && hasAuthority && hasNumber) {
+          HapticFeedback.lightImpact();
+          setState(() {
+            _isFrontValid = true;
+            _frontMsg = "✅ Valid: Name & Aadhaar Match";
+            _extractedAadharNumber = match.group(0)!.replaceAll(' ', '');
+          });
+        } else {
+          String errors = "Invalid Document Detected:\n";
+          if (!hasName) errors += "❌ Name mismatch with input.\n";
+          if (!hasAuthority) errors += "❌ Missing Govt. of India.\n";
+          if (!hasNumber) errors += "❌ No valid 12-digit number.\n";
+
+          HapticFeedback.heavyImpact();
+          _showStrictErrorDialog(errors.trim());
+
+          setState(() {
+            _isFrontValid = false;
+            _frontImage = null;
+            _frontMsg = "Tap to Scan Front";
           });
         }
       } else {
-        if (mounted) {
+        // Back Side Logic
+        if (fullText.contains("address") ||
+            fullText.contains("pin") ||
+            recognizedText.text.contains(RegExp(r'\d{6}'))) {
+          HapticFeedback.lightImpact();
           setState(() {
-            _isBackValid = (fullText.contains("address") ||
-                fullText.contains("pincode") ||
-                fullText.contains("pin"));
-            _backMsg =
-                _isBackValid ? "✅ Address Detected" : "⚠️ Address Unclear";
+            _isBackValid = true;
+            _backMsg = "✅ Address Detected";
+          });
+        } else {
+          HapticFeedback.heavyImpact();
+          setState(() {
+            _isBackValid = false;
+            _backImage = null;
+            _backMsg = "⚠️ Address unclear. Retake.";
           });
         }
       }
     } catch (e) {
       debugPrint("OCR Error: $e");
+      setState(() {
+        if (isFront) {
+          _isFrontValid = false;
+          _frontImage = null;
+          _frontMsg = "❌ Processing Failed";
+        } else {
+          _isBackValid = false;
+          _backImage = null;
+          _backMsg = "❌ Processing Failed";
+        }
+      });
     }
+  }
+
+  void _showStrictErrorDialog(String errorMsg) {
+    showDialog(
+        context: context,
+        builder: (c) => AlertDialog(
+              title: Row(children: [
+                const Icon(Icons.warning_amber_rounded, color: Colors.red),
+                const SizedBox(width: 8),
+                Text("Verification Failed",
+                    style: GoogleFonts.poppins(
+                        fontWeight: FontWeight.bold, fontSize: 18))
+              ]),
+              content: Text(errorMsg, style: GoogleFonts.poppins(fontSize: 14)),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16)),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(c),
+                  child: Text("RETRY",
+                      style: GoogleFonts.poppins(
+                          color: _inspectorColor, fontWeight: FontWeight.bold)),
+                )
+              ],
+            ));
   }
 
   // --- SUBMISSION LOGIC ---
   Future<void> _registerFarmer() async {
     if (_isSubmitting || _isProcessingImage) return;
 
-    if (!_formKey.currentState!.validate()) return;
-
-    if (_selectedStateId == null || _selectedDistrictId == null) {
+    // 🚀 ANTI-SILENT FAILURE: Form Validation Feedback
+    if (!_formKey.currentState!.validate()) {
+      HapticFeedback.heavyImpact();
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text("Please select State and District"),
-          backgroundColor: Colors.red));
+        content: Text("⚠️ Please fill in all required fields correctly."),
+        backgroundColor: Colors.red,
+        behavior: SnackBarBehavior.floating,
+      ));
       return;
     }
 
-    if (_frontImage == null || _backImage == null) {
+    // 🚀 ANTI-SILENT FAILURE: Location Verification
+    if (_selectedStateId == null ||
+        _selectedDistrictId == null ||
+        _selectedTalukaId == null ||
+        _selectedVillageId == null) {
+      HapticFeedback.heavyImpact();
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text("Please upload both front and back of Aadhar ID"),
-          backgroundColor: Colors.red));
+        content: Text("⚠️ Please complete the entire Location section."),
+        backgroundColor: Colors.red,
+        behavior: SnackBarBehavior.floating,
+      ));
+      return;
+    }
+
+    // 🚀 ANTI-SILENT FAILURE: Strict ID Verification
+    if (!_isFrontValid ||
+        !_isBackValid ||
+        _frontImage == null ||
+        _backImage == null) {
+      HapticFeedback.heavyImpact();
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content:
+            Text("⚠️ Please successfully scan both sides of the Aadhaar Card."),
+        backgroundColor: Colors.red,
+        behavior: SnackBarBehavior.floating,
+      ));
       return;
     }
 
@@ -254,25 +409,15 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
 
     try {
       final inspector = _supabase.auth.currentUser;
-      if (inspector == null) throw "Inspector not logged in";
-
-      final existingFarmer = await _supabase
-          .from('profiles')
-          .select('id')
-          .eq('phone', _phoneCtrl.text.trim())
-          .maybeSingle()
-          .timeout(const Duration(seconds: 15));
-
-      if (existingFarmer != null) {
-        throw "Farmer with this phone number already exists!";
-      }
+      if (inspector == null)
+        throw "Inspector session expired. Please log in again.";
 
       final newFarmerId = const Uuid().v4();
       String frontUrl = "";
       String backUrl = "";
       String time = DateTime.now().millisecondsSinceEpoch.toString();
 
-      // 🔬 Micro-fix: Explicitly set ContentType to image/jpeg for proper CDN/Web rendering
+      // 🚀 CRITICAL FIX: Safe uploadBinary method
       final fileOptions =
           const FileOptions(contentType: 'image/jpeg', upsert: true);
 
@@ -280,7 +425,8 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
         String path = 'farmers_docs/${newFarmerId}_front_$time.jpg';
         await _supabase.storage
             .from('verification_docs')
-            .upload(path, _frontImage!, fileOptions: fileOptions)
+            .uploadBinary(path, await _frontImage!.readAsBytes(),
+                fileOptions: fileOptions)
             .timeout(const Duration(seconds: 45));
         uploadedPaths.add(path);
         frontUrl =
@@ -291,18 +437,14 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
         String path = 'farmers_docs/${newFarmerId}_back_$time.jpg';
         await _supabase.storage
             .from('verification_docs')
-            .upload(path, _backImage!, fileOptions: fileOptions)
+            .uploadBinary(path, await _backImage!.readAsBytes(),
+                fileOptions: fileOptions)
             .timeout(const Duration(seconds: 45));
         uploadedPaths.add(path);
         backUrl =
             _supabase.storage.from('verification_docs').getPublicUrl(path);
       }
 
-      String? cleanAadhar =
-          _extractedAadharNumber?.replaceAll(RegExp(r'\s+'), '');
-      if (cleanAadhar != null && cleanAadhar.isEmpty) cleanAadhar = null;
-
-      // 🔬 Micro-fix: Sanitize empty strings to SQL NULLs
       String mName = _middleNameCtrl.text.trim();
       String bName = _bankNameCtrl.text.trim();
       String bAcc = _bankAccCtrl.text.trim();
@@ -314,32 +456,27 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
         'first_name': _firstNameCtrl.text.trim(),
         'middle_name': mName.isEmpty ? null : mName,
         'last_name': _lastNameCtrl.text.trim(),
-        'phone': _phoneCtrl.text.trim(),
-        'land_size': _farmSize,
-
-        // Address
+        'phone': '+91${_phoneCtrl.text.trim()}',
         'address_line_1': _addr1Ctrl.text.trim(),
         'pincode': _pinCtrl.text.trim(),
         'state': _selectedStateId,
         'district': _selectedDistrictId,
         'taluka': _selectedTalukaId,
         'village': _selectedVillageId,
-
-        // Bank Details
         'bank_account_no': bAcc.isEmpty ? null : bAcc,
         'ifsc_code': bIfsc.isEmpty ? null : bIfsc,
         'bank_name': bName.isEmpty ? null : bName,
-
-        // ID Details
-        'aadhar_number': cleanAadhar,
+        'aadhar_number': _extractedAadharNumber,
         'aadhar_front_url': frontUrl,
         'aadhar_back_url': backUrl,
-
-        // System Fields
         'verification_status': 'Verified',
         'wallet_balance': 0.0,
         'created_at': DateTime.now().toIso8601String(),
         'inspector_id': inspector.id,
+        // Match the meta_data schema expected by the rest of the app
+        'meta_data': {
+          'land_size': _farmSize,
+        }
       };
 
       await _supabase
@@ -348,12 +485,15 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
           .timeout(const Duration(seconds: 15));
 
       if (mounted) {
+        HapticFeedback.mediumImpact();
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
             content: Text("✅ Farmer Account Created Successfully!"),
-            backgroundColor: Colors.green));
+            backgroundColor: Colors.green,
+            behavior: SnackBarBehavior.floating));
         Navigator.pop(context, true);
       }
     } catch (e) {
+      // Rollback images if database insert fails
       if (uploadedPaths.isNotEmpty) {
         try {
           await _supabase.storage
@@ -362,16 +502,23 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
         } catch (_) {}
       }
 
+      String errorMsg = "Save Failed. Please try again.";
+
+      // 🚀 DUPLICATE PHONE CATCHER
+      if (e.toString().contains("unique_phone_number") ||
+          e.toString().contains("23505")) {
+        errorMsg =
+            "❌ This mobile number is already registered to another farmer.";
+      } else if (e is TimeoutException) {
+        errorMsg = "Connection timed out. Please check your internet.";
+      }
+
       if (mounted) {
-        String errorMsg = e.toString();
-        if (errorMsg.contains("Exception:")) {
-          errorMsg = errorMsg.split('Exception:').last.trim();
-        }
-        if (e is TimeoutException) {
-          errorMsg = "Connection timed out. Please try again.";
-        }
+        HapticFeedback.heavyImpact();
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text("Error: $errorMsg"), backgroundColor: Colors.red));
+            content: Text(errorMsg),
+            backgroundColor: Colors.red,
+            behavior: SnackBarBehavior.floating));
       }
     } finally {
       if (mounted) {
@@ -390,7 +537,8 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
       child: Scaffold(
         backgroundColor: const Color(0xFFF3E5F5),
         appBar: AppBar(
-          title: const Text("Register New Farmer"),
+          title: Text("Register New Farmer",
+              style: GoogleFonts.poppins(fontWeight: FontWeight.bold)),
           backgroundColor: _inspectorColor,
           foregroundColor: Colors.white,
           elevation: 0,
@@ -402,7 +550,6 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // --- 1. PERSONAL INFO ---
                 _sectionHeader("Personal Details"),
                 _buildTextField("First Name *", _firstNameCtrl, Icons.person),
                 const SizedBox(height: 15),
@@ -417,9 +564,7 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
                     isNumber: true, maxLength: 10),
 
                 const SizedBox(height: 25),
-
-                // --- 2. ID VERIFICATION ---
-                _sectionHeader("Identity Verification (Aadhar)"),
+                _sectionHeader("Strict Identity Verification"),
                 Row(
                   children: [
                     Expanded(
@@ -435,36 +580,34 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
                   Padding(
                     padding: const EdgeInsets.only(top: 8.0),
                     child: Text("Detected ID: $_extractedAadharNumber",
-                        style: const TextStyle(
+                        style: GoogleFonts.poppins(
                             fontWeight: FontWeight.bold, color: Colors.green)),
                   ),
 
                 const SizedBox(height: 25),
-
-                // --- 3. FARM INFO ---
                 _sectionHeader("Farming Details"),
                 DropdownButtonFormField<String>(
                   value: _farmSize,
                   decoration: _inputDecoration("Farm Size *", Icons.landscape),
                   items: _farmSizeOptions
-                      .map((e) => DropdownMenuItem(value: e, child: Text(e)))
+                      .map((e) => DropdownMenuItem(
+                          value: e,
+                          child: Text(e, style: GoogleFonts.poppins())))
                       .toList(),
                   onChanged: (v) => setState(() => _farmSize = v),
                   validator: (v) => v == null ? "Required" : null,
                 ),
 
                 const SizedBox(height: 25),
-
-                // --- 4. LOCATION ---
                 _sectionHeader("Location"),
                 _locationDropdown("State *", _selectedStateId, _stateList,
                     (val) {
                   setState(() {
                     _selectedStateId = val;
                     _districtList = LocationService.getDistricts(val!);
-                    _selectedDistrictId = null;
-                    _talukaList = [];
-                    _villageList = [];
+                    _selectedDistrictId =
+                        _selectedTalukaId = _selectedVillageId = null;
+                    _talukaList = _villageList = [];
                   });
                 }),
                 const SizedBox(height: 15),
@@ -474,7 +617,7 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
                     _selectedDistrictId = val;
                     _talukaList =
                         LocationService.getTalukas(_selectedStateId!, val!);
-                    _selectedTalukaId = null;
+                    _selectedTalukaId = _selectedVillageId = null;
                     _villageList = [];
                   });
                 }),
@@ -483,7 +626,7 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
                   children: [
                     Expanded(
                       child: _locationDropdown(
-                          "Taluka", _selectedTalukaId, _talukaList, (val) {
+                          "Taluka *", _selectedTalukaId, _talukaList, (val) {
                         setState(() {
                           _selectedTalukaId = val;
                           _villageList = LocationService.getVillages(
@@ -495,7 +638,7 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
                     const SizedBox(width: 10),
                     Expanded(
                       child: _locationDropdown(
-                          "Village", _selectedVillageId, _villageList, (val) {
+                          "Village *", _selectedVillageId, _villageList, (val) {
                         setState(() => _selectedVillageId = val);
                       }),
                     ),
@@ -503,8 +646,6 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
                 ),
 
                 const SizedBox(height: 25),
-
-                // --- 5. ADDRESS ---
                 _sectionHeader("Address"),
                 _buildTextField("Address / Landmark *", _addr1Ctrl, Icons.home),
                 const SizedBox(height: 15),
@@ -512,9 +653,7 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
                     isNumber: true, maxLength: 6),
 
                 const SizedBox(height: 25),
-
-                // --- 6. BANK DETAILS ---
-                _sectionHeader("Bank Details"),
+                _sectionHeader("Bank Details (Optional)"),
                 _buildTextField(
                     "Bank Name", _bankNameCtrl, Icons.account_balance,
                     required: false),
@@ -547,8 +686,8 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
                             width: 24,
                             child: CircularProgressIndicator(
                                 color: Colors.white, strokeWidth: 2))
-                        : const Text("Create Farmer Account",
-                            style: TextStyle(
+                        : Text("Create Farmer Account",
+                            style: GoogleFonts.poppins(
                                 fontSize: 16,
                                 fontWeight: FontWeight.bold,
                                 color: Colors.white)),
@@ -563,7 +702,6 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
     );
   }
 
-  // --- HELPER WIDGETS ---
   Widget _sectionHeader(String title) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 15),
@@ -572,7 +710,7 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
           Container(width: 4, height: 18, color: _inspectorColor),
           const SizedBox(width: 8),
           Text(title,
-              style: const TextStyle(
+              style: GoogleFonts.poppins(
                   fontSize: 16,
                   fontWeight: FontWeight.bold,
                   color: Colors.black87)),
@@ -601,6 +739,7 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
         }
         return null;
       },
+      style: GoogleFonts.poppins(),
       decoration: _inputDecoration(label, icon).copyWith(counterText: ""),
     );
   }
@@ -613,7 +752,9 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
       items: items
           .map((e) => DropdownMenuItem(
               value: e.id,
-              child: Text(e.nameEn, overflow: TextOverflow.ellipsis)))
+              child: Text(e.nameEn,
+                  overflow: TextOverflow.ellipsis,
+                  style: GoogleFonts.poppins())))
           .toList(),
       onChanged: onChanged,
       validator: (v) => label.contains("*") && v == null ? "Required" : null,
@@ -624,6 +765,7 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
   InputDecoration _inputDecoration(String label, IconData icon) {
     return InputDecoration(
       labelText: label,
+      labelStyle: GoogleFonts.poppins(fontSize: 14),
       prefixIcon: Icon(icon, color: _inspectorColor.withOpacity(0.6)),
       filled: true,
       fillColor: Colors.white,
@@ -635,6 +777,7 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
           borderRadius: BorderRadius.circular(12),
           borderSide: BorderSide(color: _inspectorColor, width: 1.5)),
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+      errorStyle: GoogleFonts.poppins(color: Colors.red),
     );
   }
 
@@ -666,23 +809,27 @@ class _AddFarmerScreenState extends State<AddFarmerScreen> {
             ),
             Container(
               width: double.infinity,
-              padding: const EdgeInsets.symmetric(vertical: 6),
+              padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
               decoration: BoxDecoration(
                 color: isValid
                     ? Colors.green
-                    : (img != null ? Colors.orange : Colors.grey.shade100),
+                    : (img != null
+                        ? (msg.contains("❌") ? Colors.red : Colors.orange)
+                        : Colors.grey.shade100),
                 borderRadius:
                     const BorderRadius.vertical(bottom: Radius.circular(10)),
               ),
               child: Text(
-                isValid ? "Verified" : title,
+                isValid ? "Verified" : msg,
                 textAlign: TextAlign.center,
-                style: TextStyle(
-                    fontSize: 12,
+                style: GoogleFonts.poppins(
+                    fontSize: 11,
                     fontWeight: FontWeight.bold,
                     color: (isValid || img != null)
                         ? Colors.white
                         : Colors.black54),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
               ),
             )
           ],
@@ -700,8 +847,6 @@ class UpperCaseTextFormatter extends TextInputFormatter {
   TextEditingValue formatEditUpdate(
       TextEditingValue oldValue, TextEditingValue newValue) {
     return TextEditingValue(
-      text: newValue.text.toUpperCase(),
-      selection: newValue.selection,
-    );
+        text: newValue.text.toUpperCase(), selection: newValue.selection);
   }
 }

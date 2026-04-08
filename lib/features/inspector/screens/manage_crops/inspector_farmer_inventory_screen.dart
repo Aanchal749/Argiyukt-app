@@ -3,7 +3,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import 'package:agriyukt_app/features/farmer/screens/view_crop_screen.dart';
-import 'package:agriyukt_app/features/farmer/screens/add_crop_tab.dart';
+import 'package:agriyukt_app/features/farmer/screens/add_crop_screen.dart'; // 🚀 FIXED IMPORT
 import 'inspector_crop_card.dart';
 import 'inspector_edit_crop_screen.dart';
 
@@ -265,8 +265,9 @@ class _InspectorFarmerInventoryScreenState
                       final crop = filteredCrops[index];
 
                       double qtyNum = _parseQuantity(crop['quantity']);
-                      if (qtyNum == 0)
+                      if (qtyNum == 0) {
                         qtyNum = _parseQuantity(crop['quantity_kg']);
+                      }
 
                       String qtyValue = _formatNumber(qtyNum);
 
@@ -301,8 +302,9 @@ class _InspectorFarmerInventoryScreenState
                       } catch (_) {}
 
                       double priceNum = _parseQuantity(crop['price']);
-                      if (priceNum == 0)
+                      if (priceNum == 0) {
                         priceNum = _parseQuantity(crop['price_per_qty']);
+                      }
                       String priceVal = _formatNumber(priceNum);
 
                       return InspectorCropCard(
@@ -338,7 +340,8 @@ class _InspectorFarmerInventoryScreenState
         onPressed: () => Navigator.push(
             context,
             MaterialPageRoute(
-                builder: (_) => AddCropTab(farmerId: widget.farmerId))),
+                // 🚀 FIXED: Call AddCropScreen instead of AddCropTab
+                builder: (_) => AddCropScreen(farmerId: widget.farmerId))),
         backgroundColor: _inspectorColor,
         icon: const Icon(Icons.add, color: Colors.white),
         label: Text("Add Crop",

@@ -16,13 +16,20 @@ class _SplashScreenState extends State<SplashScreen>
   @override
   void initState() {
     super.initState();
-    // ✅ VISUALS ONLY. No Logic. No Navigation.
-    // The 'FlowOrchestrator' in main.dart handles the logic while this animation plays.
-    _controller =
-        AnimationController(duration: const Duration(seconds: 2), vsync: this);
+    
+    _controller = AnimationController(
+        duration: const Duration(seconds: 2), vsync: this);
     _scaleAnimation =
         CurvedAnimation(parent: _controller, curve: Curves.easeOutExpo);
-    _controller.forward();
+        
+    // 🚀 THE FIX TO GUARANTEE THE ZOOM: 
+    // This tiny delay ensures the white screen is fully drawn BEFORE the zoom starts.
+    // Now you will see it perfectly scale up from 0 every single time.
+    Future.delayed(const Duration(milliseconds: 300), () {
+      if (mounted) {
+        _controller.forward();
+      }
+    });
   }
 
   @override

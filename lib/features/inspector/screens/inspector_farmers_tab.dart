@@ -9,7 +9,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:agriyukt_app/features/inspector/screens/add_farmer_screen.dart';
 import 'package:agriyukt_app/features/inspector/screens/edit_farmer_screen.dart';
 import 'package:agriyukt_app/features/inspector/screens/manage_crops/inspector_farmer_inventory_screen.dart';
-import 'package:agriyukt_app/features/farmer/screens/add_crop_tab.dart';
+import 'package:agriyukt_app/features/farmer/screens/add_crop_screen.dart'; // 🚀 FIXED IMPORT
 
 class InspectorFarmersTab extends StatefulWidget {
   const InspectorFarmersTab({super.key});
@@ -69,8 +69,6 @@ class _InspectorFarmersTabState extends State<InspectorFarmersTab> {
       final user = _client.auth.currentUser;
       if (user == null) throw "Authentication error. Please log in again.";
 
-      // 🚀 THE FIX: Removed the column restriction.
-      // We MUST use .select() to get the full row, otherwise the Edit Screen gets blank bank/address data!
       final response = await _client
           .from('profiles')
           .select()
@@ -641,8 +639,8 @@ class _InspectorFarmersTabState extends State<InspectorFarmersTab> {
                           Navigator.push(
                                   context,
                                   MaterialPageRoute(
-                                      builder: (_) =>
-                                          AddCropTab(farmerId: safeId)))
+                                      builder: (_) => AddCropScreen(
+                                          farmerId: safeId))) // 🚀 FIXED CALL
                               .then((_) => _fetchFarmers(silent: true));
                         } else if (value == 'edit') {
                           bool? updated = await Navigator.push(

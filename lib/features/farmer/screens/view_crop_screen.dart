@@ -9,12 +9,14 @@ import 'package:intl/intl.dart';
 import 'package:agriyukt_app/features/farmer/farmer_translations.dart';
 import 'package:agriyukt_app/core/services/translation_service.dart';
 import 'package:agriyukt_app/core/providers/language_provider.dart';
-import 'package:agriyukt_app/features/farmer/screens/add_crop_tab.dart';
+
+// 🚀 FIXED IMPORT: Calling the new AddCropScreen
+import 'package:agriyukt_app/features/farmer/screens/add_crop_screen.dart';
 
 // 🛡️ PRODUCTION CACHE
 final Map<String, String> _globalTranslationCache = {};
 
-class ViewCropScreen extends StatelessWidget {
+class ViewCropScreen extends StatefulWidget {
   final Map<String, dynamic> crop;
 
   // 🛡️ PROPS FOR INSPECTOR INTEGRATION
@@ -27,6 +29,84 @@ class ViewCropScreen extends StatelessWidget {
     this.hideEditButton = false,
     this.onCustomEditTap,
   });
+
+  @override
+  State<ViewCropScreen> createState() => _ViewCropScreenState();
+}
+
+class _ViewCropScreenState extends State<ViewCropScreen> {
+  final _supabase = Supabase.instance.client;
+
+  // 🚀 AI Prediction State
+  Map<String, dynamic>? _predictionData;
+  bool _isLoadingPrediction = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchCropPrediction();
+  }
+
+  // 🚀 SMART CROP MATCHER: Bypasses strict DB naming rules
+  bool _isCropMatch(String farmerCrop, String aiCrop) {
+    String f = farmerCrop.toLowerCase().trim();
+    String a = aiCrop.toLowerCase().trim();
+
+    if (f == a) return true;
+
+    // Handle Okra/Ladyfinger legacy naming variations seamlessly
+    if ((f.contains('okra') ||
+            f.contains('ladyfinger') ||
+            f.contains('bhindi')) &&
+        (a.contains('okra') ||
+            a.contains('ladyfinger') ||
+            a.contains('bhindi'))) {
+      return true;
+    }
+
+    if (f.contains(a) || a.contains(f)) return true;
+
+    return false;
+  }
+
+  // --- 🚀 FETCH AI PREDICTION ---
+  Future<void> _fetchCropPrediction() async {
+    try {
+      final String cropName = widget.crop['crop_name']?.toString().trim() ??
+          widget.crop['name']?.toString().trim() ??
+          '';
+
+      if (cropName.isEmpty) {
+        if (mounted) setState(() => _isLoadingPrediction = false);
+        return;
+      }
+
+      // 1. Fetch ALL predictions (Fast, lightweight)
+      final response = await _supabase
+          .from('market_predictions')
+          .select()
+          .timeout(const Duration(seconds: 10));
+
+      // 2. Use Smart Matcher to find the correct crop
+      Map<String, dynamic>? matchedPrediction;
+      for (var data in response) {
+        String aiCropName = data['crop_name']?.toString() ?? '';
+        if (_isCropMatch(cropName, aiCropName)) {
+          matchedPrediction = data;
+          break;
+        }
+      }
+
+      if (mounted) {
+        setState(() {
+          _predictionData = matchedPrediction;
+          _isLoadingPrediction = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) setState(() => _isLoadingPrediction = false);
+    }
+  }
 
   Future<String> _getCachedTranslation(String text, String langCode) async {
     if (text.trim().isEmpty) return text;
@@ -55,34 +135,37 @@ class ViewCropScreen extends StatelessWidget {
     }
 
     // --- 1. SMART DATA PARSING ---
-    final String name = crop['crop_name'] ??
-        crop['name'] ??
+    final String name = widget.crop['crop_name'] ??
+        widget.crop['name'] ??
         text('unknown_crop', fallback: 'Unknown Crop');
-    final String variety = crop['variety'] ?? 'Generic';
-    final String status = crop['status'] ?? 'Active';
-    final String category = crop['category'] ?? 'General';
+    final String variety = widget.crop['variety'] ?? 'Generic';
+    final String status = widget.crop['status'] ?? 'Active';
+    final String category = widget.crop['category'] ?? 'General';
     final String grade =
-        crop['grade'] ?? text('standard', fallback: 'Standard');
+        widget.crop['grade'] ?? text('standard', fallback: 'Standard');
 
     // Safe Numeric Formatting for Price & Total Value
-    String rawPrice =
-        (crop['price']?.toString() ?? crop['price_per_qty']?.toString() ?? "0")
-            .replaceAll(RegExp(r'[^0-9.]'), '');
+    String rawPrice = (widget.crop['price']?.toString() ??
+            widget.crop['price_per_qty']?.toString() ??
+            "0")
+        .replaceAll(RegExp(r'[^0-9.]'), '');
     double priceNumeric = double.tryParse(rawPrice) ?? 0.0;
     String priceVal = NumberFormat.decimalPattern('en_IN').format(priceNumeric);
 
     // Safe Numeric Formatting for Quantity
-    String rawQty =
-        (crop['quantity_kg']?.toString() ?? crop['quantity']?.toString() ?? "0")
-            .replaceAll(RegExp(r'[^0-9.]'), '');
+    String rawQty = (widget.crop['quantity_kg']?.toString() ??
+            widget.crop['quantity']?.toString() ??
+            "0")
+        .replaceAll(RegExp(r'[^0-9.]'), '');
     double qtyVal = double.tryParse(rawQty) ?? 0.0;
     String cleanQty = qtyVal == qtyVal.truncateToDouble()
         ? qtyVal.toInt().toString()
         : qtyVal.toStringAsFixed(2);
 
-    String unit = crop['unit'] ?? "Kg";
-    if (crop['quantity'] != null && crop['quantity'].toString().contains(' ')) {
-      unit = crop['quantity'].toString().split(' ').sublist(1).join(' ');
+    String unit = widget.crop['unit'] ?? "Kg";
+    if (widget.crop['quantity'] != null &&
+        widget.crop['quantity'].toString().contains(' ')) {
+      unit = widget.crop['quantity'].toString().split(' ').sublist(1).join(' ');
     }
     final String quantityStr =
         "$cleanQty ${text(unit.toLowerCase(), fallback: unit)}";
@@ -93,13 +176,14 @@ class ViewCropScreen extends StatelessWidget {
         NumberFormat.decimalPattern('en_IN').format(totalValueNumeric);
 
     // Description Parsing
-    String description = crop['description'] ?? crop['health_notes'] ?? "";
+    String description =
+        widget.crop['description'] ?? widget.crop['health_notes'] ?? "";
     if (description.trim().isEmpty) {
       description = text('no_notes',
           fallback: "No specific notes provided for this crop.");
     }
 
-    final String imgUrl = crop['image_url']?.toString() ?? '';
+    final String imgUrl = widget.crop['image_url']?.toString() ?? '';
 
     return Scaffold(
       backgroundColor: Colors.white,
@@ -146,7 +230,7 @@ class ViewCropScreen extends StatelessWidget {
                           color: Colors.grey.shade600,
                           fontWeight: FontWeight.w500)),
                   Text("₹$totalValueStr",
-                      maxLines: 1, // ✅ Prevents massive number overflow
+                      maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: GoogleFonts.poppins(
                           fontSize: 22,
@@ -155,17 +239,18 @@ class ViewCropScreen extends StatelessWidget {
                 ],
               ),
             ),
-            if (!hideEditButton)
+            if (!widget.hideEditButton)
               ElevatedButton.icon(
                 onPressed: () async {
-                  if (onCustomEditTap != null) {
-                    onCustomEditTap!();
+                  if (widget.onCustomEditTap != null) {
+                    widget.onCustomEditTap!();
                     return;
                   }
+                  // 🚀 FIXED: Now correctly calling AddCropScreen
                   final result = await Navigator.push(
                     context,
                     MaterialPageRoute(
-                        builder: (_) => AddCropTab(cropToEdit: crop)),
+                        builder: (_) => AddCropScreen(cropToEdit: widget.crop)),
                   );
                   if (result == true && context.mounted) {
                     Navigator.pop(context, true);
@@ -200,8 +285,7 @@ class ViewCropScreen extends StatelessWidget {
           children: [
             // --- IMAGE SECTION ---
             Hero(
-              // ✅ Fallback to UniqueKey prevents crash if ID is entirely missing
-              tag: crop['id']?.toString() ?? UniqueKey().toString(),
+              tag: widget.crop['id']?.toString() ?? UniqueKey().toString(),
               child: Container(
                 height: 250,
                 width: double.infinity,
@@ -221,12 +305,11 @@ class ViewCropScreen extends StatelessWidget {
                       ? CachedNetworkImage(
                           imageUrl: imgUrl.startsWith('http')
                               ? imgUrl
-                              : Supabase.instance.client.storage
+                              : _supabase.storage
                                   .from('crop_images')
                                   .getPublicUrl(imgUrl),
                           fit: BoxFit.cover,
-                          memCacheHeight:
-                              750, // ✅ OOM Memory Protection (250px * 3x pixel density)
+                          memCacheHeight: 750,
                           placeholder: (context, url) => const Center(
                               child: CircularProgressIndicator(
                                   color: Colors.green)),
@@ -254,7 +337,7 @@ class ViewCropScreen extends StatelessWidget {
                     builder: (context, snapshot) {
                       return Text(
                         "${snapshot.data ?? name} ($variety)",
-                        maxLines: 2, // ✅ Protects against RenderFlex overflow
+                        maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                         style: GoogleFonts.poppins(
                             fontSize: 22,
@@ -301,7 +384,7 @@ class ViewCropScreen extends StatelessWidget {
                 final cat = snapshot.data?[0] ?? category;
                 final grd = snapshot.data?[1] ?? grade;
                 return Text("$cat • $grd",
-                    maxLines: 1, // ✅ Overflow protection
+                    maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: GoogleFonts.poppins(
                         color: Colors.grey[600],
@@ -310,6 +393,11 @@ class ViewCropScreen extends StatelessWidget {
               },
             ),
 
+            const SizedBox(height: 24),
+
+            // 🚀 NEW: AI MARKET INTELLIGENCE WIDGET
+            _buildFarmerMarketIntelligenceCard(),
+
             const Divider(height: 40, thickness: 1),
 
             // --- DETAILS GRID ---
@@ -317,22 +405,20 @@ class ViewCropScreen extends StatelessWidget {
                 "₹$priceVal"),
             _detailRow(Icons.scale, text('quantity', fallback: "Quantity"),
                 quantityStr),
-
             _detailRow(
                 Icons.eco,
                 text('farming_type', fallback: "Farming Mode"),
-                crop['crop_type'] ?? 'Organic',
+                widget.crop['crop_type'] ?? 'Organic',
                 langCode: langCode,
                 shouldTranslateValue: true),
-
             _detailRow(
                 Icons.event_available,
                 text('harvest_date', fallback: "Harvest Date"),
-                _formatDate(context, crop['harvest_date'])),
+                _formatDate(context, widget.crop['harvest_date'])),
             _detailRow(
                 Icons.local_shipping,
                 text('avail_from', fallback: "Available From"),
-                _formatDate(context, crop['available_from'])),
+                _formatDate(context, widget.crop['available_from'])),
 
             const SizedBox(height: 30),
 
@@ -369,6 +455,133 @@ class ViewCropScreen extends StatelessWidget {
     );
   }
 
+  // 🚀 AI INTELLIGENCE CARD (Tailored for Sellers/Farmers)
+  Widget _buildFarmerMarketIntelligenceCard() {
+    if (_isLoadingPrediction) {
+      return Container(
+          height: 100,
+          decoration: BoxDecoration(
+              color: Colors.grey.shade200,
+              borderRadius: BorderRadius.circular(16)),
+          child: const Center(child: CircularProgressIndicator()));
+    }
+
+    if (_predictionData == null) return const SizedBox.shrink();
+
+    final double liveAvg =
+        double.tryParse(_predictionData!['live_price']?.toString() ?? '0') ??
+            0.0;
+    final double predicted = double.tryParse(
+            _predictionData!['predicted_price']?.toString() ?? '0') ??
+        0.0;
+    final double trend =
+        double.tryParse(_predictionData!['trend_percent']?.toString() ?? '0') ??
+            0.0;
+    final bool isUpward = _predictionData!['is_upward'] == true;
+
+    // For Farmers: Price UP is good (Green), Price DOWN is bad (Orange)
+    final Color trendColor =
+        isUpward ? Colors.greenAccent : Colors.orangeAccent;
+    final IconData trendIcon =
+        isUpward ? Icons.trending_up : Icons.trending_down;
+    int decimals = liveAvg < 100 ? 1 : 0;
+
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+          gradient: const LinearGradient(
+            colors: [Color(0xFF0F2027), Color(0xFF203A43)], // Premium dark mode
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+          borderRadius: BorderRadius.circular(20),
+          boxShadow: [
+            BoxShadow(
+                color: Colors.black.withOpacity(0.15),
+                blurRadius: 15,
+                offset: const Offset(0, 8))
+          ]),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.insights, color: Colors.amberAccent, size: 20),
+              const SizedBox(width: 8),
+              Text("AI Pricing Guidance",
+                  style: GoogleFonts.poppins(
+                      fontSize: 15,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white)),
+            ],
+          ),
+          const SizedBox(height: 16),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text("Market Avg. Today",
+                      style: GoogleFonts.poppins(
+                          fontSize: 12, color: Colors.grey.shade400)),
+                  Text("₹${liveAvg.toStringAsFixed(decimals)}",
+                      style: GoogleFonts.poppins(
+                          fontSize: 20,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.white)),
+                ],
+              ),
+              Container(width: 1, height: 40, color: Colors.grey.shade600),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text("Tomorrow's Prediction",
+                      style: GoogleFonts.poppins(
+                          fontSize: 12, color: Colors.grey.shade400)),
+                  Row(
+                    children: [
+                      Icon(trendIcon, color: trendColor, size: 18),
+                      const SizedBox(width: 4),
+                      Text("₹${predicted.toStringAsFixed(decimals)}",
+                          style: GoogleFonts.poppins(
+                              fontSize: 24,
+                              fontWeight: FontWeight.bold,
+                              color: trendColor)),
+                    ],
+                  ),
+                ],
+              )
+            ],
+          ),
+          const SizedBox(height: 16),
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(8)),
+            child: Row(
+              children: [
+                Icon(Icons.lightbulb_outline,
+                    color: Colors.grey.shade300, size: 16),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    isUpward
+                        ? "Market demand is rising by ${trend.toStringAsFixed(1)}%. You can price slightly higher for maximum profit."
+                        : "Market prices are expected to drop by ${trend.toStringAsFixed(1)}%. Consider adjusting your price to sell quickly.",
+                    style: GoogleFonts.poppins(
+                        fontSize: 11, color: Colors.grey.shade300),
+                  ),
+                ),
+              ],
+            ),
+          )
+        ],
+      ),
+    );
+  }
+
   Widget _detailRow(IconData icon, String label, String value,
       {String? langCode, bool shouldTranslateValue = false}) {
     return Padding(
@@ -388,9 +601,7 @@ class ViewCropScreen extends StatelessWidget {
                   color: Colors.grey[700],
                   fontSize: 14,
                   fontWeight: FontWeight.w500)),
-          const SizedBox(
-              width:
-                  8), // ✅ Changed from Spacer to ensure long values truncate safely
+          const SizedBox(width: 8),
           Expanded(
             child: shouldTranslateValue && langCode != null
                 ? FutureBuilder<String>(

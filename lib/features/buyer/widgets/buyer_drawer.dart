@@ -6,7 +6,6 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:agriyukt_app/features/auth/screens/login_screen.dart';
 import 'package:agriyukt_app/features/common/screens/settings_screen.dart';
 import 'package:agriyukt_app/features/buyer/screens/buyer_favorites_screen.dart';
-// ✅ Import the new Support Screen file
 import 'package:agriyukt_app/features/common/screens/support_screens.dart';
 
 class BuyerDrawer extends StatefulWidget {
@@ -21,9 +20,8 @@ class _BuyerDrawerState extends State<BuyerDrawer> {
   final _supabase = Supabase.instance.client;
   String _userName = "Buyer";
   String _shortId = "0000";
-  String _email = "";
 
-  // ✅ Buyer Theme Color
+  // ✅ Premium Buyer Blue Theme
   final Color _buyerBlue = const Color(0xFF1565C0);
 
   @override
@@ -44,7 +42,6 @@ class _BuyerDrawerState extends State<BuyerDrawer> {
 
         if (mounted) {
           setState(() {
-            _email = user.email ?? "";
             _shortId = user.id.length > 4
                 ? user.id.substring(0, 4).toUpperCase()
                 : "0778";
@@ -67,70 +64,130 @@ class _BuyerDrawerState extends State<BuyerDrawer> {
   Widget build(BuildContext context) {
     return Drawer(
       backgroundColor: Colors.white,
+      surfaceTintColor: Colors.transparent,
       child: Column(
         children: [
-          // --- 1. HEADER (Blue) ---
-          InkWell(
-            onTap: () {
-              Navigator.pop(context);
-              widget.onTabChange(3); // Go to Profile Tab
-            },
-            child: Container(
-              width: double.infinity,
-              padding: const EdgeInsets.fromLTRB(20, 50, 20, 20),
-              decoration: BoxDecoration(
-                color: _buyerBlue,
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  CircleAvatar(
-                    radius: 30,
-                    backgroundColor: Colors.white,
-                    child: Text(
-                      _userName.isNotEmpty ? _userName[0].toUpperCase() : "B",
-                      style: GoogleFonts.poppins(
-                          fontSize: 26,
-                          fontWeight: FontWeight.bold,
-                          color: _buyerBlue),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  Text(
-                    "Namaste, $_userName",
-                    style: GoogleFonts.poppins(
-                      color: Colors.white,
-                      fontSize: 19,
-                      fontWeight: FontWeight.w600,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  const SizedBox(height: 4),
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.2),
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                    child: Text(
-                      "ID: BUY-$_shortId",
-                      style: GoogleFonts.poppins(
-                          color: Colors.white,
-                          fontSize: 11,
-                          fontWeight: FontWeight.w500),
-                    ),
-                  ),
+          // ==========================================
+          // 1. CRISP PREMIUM HEADER
+          // ==========================================
+          Container(
+            width: double.infinity,
+            padding: EdgeInsets.fromLTRB(
+                20, MediaQuery.of(context).padding.top + 20, 20, 30),
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  Color(0xFF2979FF), // Lighter Blue
+                  Color(0xFF0D47A1), // Deep Blue
                 ],
               ),
+              // 🚀 FIX: Clean, symmetrical bottom border instead of a weird blurry wave
+              borderRadius: BorderRadius.only(
+                bottomLeft: Radius.circular(24),
+                bottomRight: Radius.circular(24),
+              ),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                // 🌟 Clean Glowing Avatar Ring
+                Container(
+                  padding: const EdgeInsets.all(3),
+                  decoration: const BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: LinearGradient(
+                      colors: [
+                        Colors.cyanAccent,
+                        Colors.blueAccent,
+                        Colors.purpleAccent
+                      ],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                    ),
+                  ),
+                  child: Container(
+                    padding: const EdgeInsets.all(2),
+                    decoration: const BoxDecoration(
+                      color: Color(0xFF0D47A1), // Inner dark background
+                      shape: BoxShape.circle,
+                    ),
+                    child: CircleAvatar(
+                      radius: 32, // Slightly adjusted to fit perfectly
+                      backgroundColor: Colors.transparent,
+                      child: Text(
+                        _userName.isNotEmpty ? _userName[0].toUpperCase() : "B",
+                        style: GoogleFonts.poppins(
+                          fontSize: 28,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 16),
+
+                // 📝 User Info
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        "Namaste 👋",
+                        style: GoogleFonts.poppins(
+                          color: Colors.white,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      // 🚀 FIX: Surname cutting off is fixed by maxLines: 2
+                      Text(
+                        _userName,
+                        style: GoogleFonts.poppins(
+                          color: Colors.white,
+                          fontSize: 18, // Font scaled perfectly
+                          fontWeight: FontWeight.bold,
+                          height: 1.2,
+                        ),
+                        maxLines: 2, // Allows long names to wrap elegantly
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 8),
+                      // 🆔 Crisp ID Pill
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: Colors.white
+                              .withOpacity(0.2), // Clean translucent
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Text(
+                          "ID: BUY-$_shortId",
+                          style: GoogleFonts.poppins(
+                            color: Colors.white,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            letterSpacing: 0.5,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ),
           ),
 
-          // --- 2. MENU ITEMS ---
+          // ==========================================
+          // 2. MENU ITEMS
+          // ==========================================
           Expanded(
             child: ListView(
               padding: const EdgeInsets.symmetric(vertical: 10),
+              physics: const BouncingScrollPhysics(),
               children: [
                 _drawerItem(
                   icon: Icons.person_outline,
@@ -141,8 +198,8 @@ class _BuyerDrawerState extends State<BuyerDrawer> {
                   },
                 ),
                 const Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 20),
-                  child: Divider(thickness: 0.5),
+                  padding: EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+                  child: Divider(thickness: 0.5, color: Color(0xFFE0E0E0)),
                 ),
                 _drawerItem(
                   icon: Icons.home_outlined,
@@ -160,7 +217,6 @@ class _BuyerDrawerState extends State<BuyerDrawer> {
                     widget.onTabChange(1); // Market Tab
                   },
                 ),
-
                 _drawerItem(
                   icon: Icons.favorite_border,
                   text: "My Favorites",
@@ -173,7 +229,6 @@ class _BuyerDrawerState extends State<BuyerDrawer> {
                     );
                   },
                 ),
-
                 _drawerItem(
                   icon: Icons.receipt_long_outlined,
                   text: "My Orders",
@@ -182,13 +237,10 @@ class _BuyerDrawerState extends State<BuyerDrawer> {
                     widget.onTabChange(2); // Orders Tab
                   },
                 ),
-
                 const Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 20, vertical: 5),
-                  child: Divider(thickness: 0.5),
+                  padding: EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+                  child: Divider(thickness: 0.5, color: Color(0xFFE0E0E0)),
                 ),
-
-                // 1. Settings
                 _drawerItem(
                   icon: Icons.settings_outlined,
                   text: "Settings",
@@ -205,8 +257,6 @@ class _BuyerDrawerState extends State<BuyerDrawer> {
                     );
                   },
                 ),
-
-                // ✅ 2. Help & Support (Now links to ContactSupportScreen)
                 _drawerItem(
                   icon: Icons.support_agent,
                   text: "Help & Support",
@@ -215,8 +265,8 @@ class _BuyerDrawerState extends State<BuyerDrawer> {
                     Navigator.push(
                       context,
                       MaterialPageRoute(
-                        builder: (_) => ContactSupportScreen(
-                            themeColor: _buyerBlue), // ✅ FIXED
+                        builder: (_) =>
+                            ContactSupportScreen(themeColor: _buyerBlue),
                       ),
                     );
                   },
@@ -225,25 +275,32 @@ class _BuyerDrawerState extends State<BuyerDrawer> {
             ),
           ),
 
-          // --- 3. LOGOUT ---
+          // ==========================================
+          // 3. PREMIUM LOGOUT BUTTON
+          // ==========================================
           SafeArea(
             bottom: true,
             child: Container(
-              margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              margin: const EdgeInsets.fromLTRB(20, 10, 20, 24),
               decoration: BoxDecoration(
-                color: Colors.red.shade50,
-                borderRadius: BorderRadius.circular(10),
+                color: const Color(0xFFFFF0F0), // Very light red
+                borderRadius: BorderRadius.circular(16),
               ),
               child: ListTile(
-                leading: const Icon(Icons.logout, color: Colors.red, size: 24),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16)),
+                leading: Icon(Icons.logout_rounded,
+                    color: Colors.red.shade700, size: 24),
                 title: Text(
                   "Logout",
                   style: GoogleFonts.poppins(
-                    color: Colors.red,
+                    color: Colors.red.shade700,
                     fontWeight: FontWeight.bold,
                     fontSize: 16,
                   ),
                 ),
+                trailing: Icon(Icons.chevron_right_rounded,
+                    color: Colors.red.shade700, size: 24),
                 onTap: () async {
                   await _supabase.auth.signOut();
                   if (context.mounted) {
@@ -262,22 +319,22 @@ class _BuyerDrawerState extends State<BuyerDrawer> {
     );
   }
 
-  // --- Helper Widget for Items ---
+  // --- Helper Widget for Menu Items ---
   Widget _drawerItem({
     required IconData icon,
     required String text,
     required VoidCallback onTap,
   }) {
     return ListTile(
-      contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 2),
       visualDensity: VisualDensity.compact,
-      leading: Icon(icon, color: Colors.black87, size: 24),
+      leading: Icon(icon, color: Colors.black87, size: 26),
       title: Text(
         text,
         style: GoogleFonts.poppins(
           color: Colors.black87,
           fontSize: 16,
-          fontWeight: FontWeight.w500,
+          fontWeight: FontWeight.w600, // Slightly bolder to match screenshot
         ),
       ),
       onTap: onTap,

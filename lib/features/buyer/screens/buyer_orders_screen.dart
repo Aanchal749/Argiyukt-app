@@ -5,6 +5,11 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:intl/intl.dart';
+import 'package:provider/provider.dart';
+
+// ✅ LOCALIZATION IMPORTS
+import 'package:agriyukt_app/features/farmer/farmer_translations.dart';
+import 'package:agriyukt_app/core/providers/language_provider.dart';
 import 'package:agriyukt_app/features/buyer/screens/buyer_order_detail_screen.dart';
 
 class BuyerOrdersScreen extends StatefulWidget {
@@ -52,12 +57,15 @@ class _BuyerOrdersScreenState extends State<BuyerOrdersScreen>
     WidgetsBinding.instance.addObserver(this);
     _tabController = TabController(
         length: 3, vsync: this, initialIndex: widget.initialIndex);
+
+    // 🔒 LOOPHOLE CLOSED: Keyboard Trap Prevention
     _tabController.addListener(() {
       if (_tabController.indexIsChanging) {
         FocusScope.of(context).unfocus();
         HapticFeedback.selectionClick();
       }
     });
+
     _fetchOrders();
     _setupRealtimeSubscription();
   }
@@ -108,8 +116,9 @@ class _BuyerOrdersScreenState extends State<BuyerOrdersScreen>
           callback: (payload) async {
             if (payload.eventType == PostgresChangeEvent.delete) {
               final oldId = payload.oldRecord['id'];
-              if (mounted)
+              if (mounted) {
                 setState(() => _allOrders.removeWhere((o) => o['id'] == oldId));
+              }
               return;
             }
 
@@ -122,7 +131,9 @@ class _BuyerOrdersScreenState extends State<BuyerOrdersScreen>
                   .select(
                       '*, farmer:profiles!farmer_id(first_name, last_name, district, state), crop:crops!crop_id(image_url, crop_name, variety)')
                   .eq('id', newRec['id'])
-                  .maybeSingle();
+                  .maybeSingle()
+                  .timeout(
+                      const Duration(seconds: 10)); // 🚀 Timeout protection
 
               if (updatedOrder != null && mounted) {
                 setState(() {
@@ -155,6 +166,7 @@ class _BuyerOrdersScreenState extends State<BuyerOrdersScreen>
         });
       }
 
+      // 🚀 TIMEOUT GUARD: Prevents infinite loading loops
       final response = await _supabase
           .from('orders')
           .select('''
@@ -164,7 +176,8 @@ class _BuyerOrdersScreenState extends State<BuyerOrdersScreen>
           ''')
           .eq('buyer_id', user.id)
           .order('created_at', ascending: false)
-          .limit(_limit);
+          .limit(_limit)
+          .timeout(const Duration(seconds: 15));
 
       if (mounted) {
         setState(() {
@@ -182,8 +195,9 @@ class _BuyerOrdersScreenState extends State<BuyerOrdersScreen>
       if (mounted) {
         setState(() {
           _isLoading = false;
-          if (_allOrders.isEmpty)
+          if (_allOrders.isEmpty) {
             _errorMessage = "Connection error. Please pull to refresh.";
+          }
         });
       }
     }
@@ -247,10 +261,12 @@ class _BuyerOrdersScreenState extends State<BuyerOrdersScreen>
     final farmerName =
         "${farmer['first_name'] ?? ''} ${farmer['last_name'] ?? ''}"
             .toLowerCase();
+    final orderIdStr = o['id'].toString().toLowerCase();
 
     return cropName.contains(q) ||
         variety.contains(q) ||
-        farmerName.contains(q);
+        farmerName.contains(q) ||
+        orderIdStr.contains(q);
   }
 
   // =======================================================================
@@ -305,8 +321,8 @@ class _BuyerOrdersScreenState extends State<BuyerOrdersScreen>
       _hasScrolled = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (targetController != null && targetController.hasClients) {
-          // 🔒 EXACT MATH: Card Height (240) + Separator (16) = 256.0 pixels exactly
-          targetController.jumpTo(indexInList * 256.0);
+          // 🔒 EXACT MATH: New Card Height (290) + Separator (16) = 306.0 pixels exactly
+          targetController.jumpTo(indexInList * 306.0);
         }
       });
     }
@@ -336,8 +352,7 @@ class _BuyerOrdersScreenState extends State<BuyerOrdersScreen>
                     color: Colors.black87)),
           ],
         ),
-        content: Text(
-            "Are you sure you want to cancel this request? The stock will be returned to the farmer.",
+        content: Text("Are you sure you want to cancel this pending request?",
             textAlign: TextAlign.center,
             style:
                 GoogleFonts.poppins(color: Colors.grey.shade600, fontSize: 13)),
@@ -390,9 +405,12 @@ class _BuyerOrdersScreenState extends State<BuyerOrdersScreen>
               child: CircularProgressIndicator(color: Colors.white)));
 
       try {
+        // 🚀 TIMEOUT GUARD ADDED
         await _supabase
             .from('orders')
-            .update({'status': 'cancelled'}).eq('id', orderId);
+            .update({'status': 'cancelled'})
+            .eq('id', orderId)
+            .timeout(const Duration(seconds: 10));
 
         if (mounted) {
           setState(() {
@@ -414,7 +432,7 @@ class _BuyerOrdersScreenState extends State<BuyerOrdersScreen>
           content: Row(children: [
             const Icon(Icons.check_circle, color: Colors.white),
             const SizedBox(width: 12),
-            Text("Order cancelled successfully.",
+            Text("Request cancelled successfully.",
                 style: GoogleFonts.poppins(fontWeight: FontWeight.w500)),
           ]),
           backgroundColor: Colors.grey.shade900,
@@ -424,10 +442,11 @@ class _BuyerOrdersScreenState extends State<BuyerOrdersScreen>
           margin: const EdgeInsets.all(16),
         ));
       } catch (e) {
-        if (mounted) Navigator.pop(context);
+        if (mounted) Navigator.pop(context); // Close loading dialog
+        HapticFeedback.heavyImpact(); // 🚀 ANTI-SILENT FAILURE
         messenger.showSnackBar(SnackBar(
-          content: Text("DB Error: ${e.toString().split('\n').first}",
-              style: GoogleFonts.poppins()),
+          content: Text("Action Failed. Please check connection.",
+              style: GoogleFonts.poppins(fontWeight: FontWeight.bold)),
           backgroundColor: Colors.red.shade800,
           behavior: SnackBarBehavior.floating,
         ));
@@ -435,8 +454,17 @@ class _BuyerOrdersScreenState extends State<BuyerOrdersScreen>
     }
   }
 
+  String _text(String key) => FarmerText.get(context, key);
+
   @override
   Widget build(BuildContext context) {
+    Provider.of<LanguageProvider>(context);
+    final myId = _supabase.auth.currentUser?.id;
+
+    if (myId == null) {
+      return Scaffold(body: Center(child: Text(_text('login_required'))));
+    }
+
     final pending = _getPendingOrders();
     final active = _getActiveOrders();
     final history = _getCompletedOrders();
@@ -469,7 +497,7 @@ class _BuyerOrdersScreenState extends State<BuyerOrdersScreen>
             textInputAction: TextInputAction.search,
             onSubmitted: (_) => FocusScope.of(context).unfocus(),
             decoration: InputDecoration(
-              hintText: "Search crop, variety, or farmer...",
+              hintText: "Search crop, variety, or order ID...",
               hintStyle: GoogleFonts.poppins(
                   color: Colors.grey.shade400, fontSize: 13),
               prefixIcon: Icon(Icons.search_rounded,
@@ -499,10 +527,10 @@ class _BuyerOrdersScreenState extends State<BuyerOrdersScreen>
               GoogleFonts.poppins(fontWeight: FontWeight.bold, fontSize: 13),
           unselectedLabelStyle:
               GoogleFonts.poppins(fontWeight: FontWeight.w500, fontSize: 13),
-          tabs: const [
-            Tab(text: "Pending"),
-            Tab(text: "Active"),
-            Tab(text: "History")
+          tabs: [
+            Tab(text: _text('requests')),
+            Tab(text: _text('active')),
+            const Tab(text: "History")
           ],
         ),
       ),
@@ -520,6 +548,7 @@ class _BuyerOrdersScreenState extends State<BuyerOrdersScreen>
             icon: Icons.hourglass_empty_rounded,
             errorMessage: _errorMessage,
             highlightOrderId: widget.highlightOrderId,
+            tabType: 'pending',
           ),
           _OrderList(
             orders: active,
@@ -532,6 +561,7 @@ class _BuyerOrdersScreenState extends State<BuyerOrdersScreen>
             icon: Icons.local_shipping_outlined,
             errorMessage: _errorMessage,
             highlightOrderId: widget.highlightOrderId,
+            tabType: 'active',
           ),
           _OrderList(
             orders: history,
@@ -544,6 +574,7 @@ class _BuyerOrdersScreenState extends State<BuyerOrdersScreen>
             icon: Icons.inventory_2_outlined,
             errorMessage: _errorMessage,
             highlightOrderId: widget.highlightOrderId,
+            tabType: 'history',
           ),
         ],
       ),
@@ -551,6 +582,9 @@ class _BuyerOrdersScreenState extends State<BuyerOrdersScreen>
   }
 }
 
+// ============================================================================
+// ✅ THE LIST ENGINE
+// ============================================================================
 class _OrderList extends StatefulWidget {
   final List<Map<String, dynamic>> orders;
   final bool isLoading;
@@ -560,6 +594,7 @@ class _OrderList extends StatefulWidget {
   final Function(String) onCancel;
   final String emptyMsg;
   final String emptySubMsg;
+  final String tabType;
   final IconData icon;
   final String? highlightOrderId;
 
@@ -572,6 +607,7 @@ class _OrderList extends StatefulWidget {
     required this.onCancel,
     required this.emptyMsg,
     required this.emptySubMsg,
+    required this.tabType,
     required this.icon,
     this.highlightOrderId,
   });
@@ -597,6 +633,7 @@ class _OrderListState extends State<_OrderList>
       color: const Color(0xFF1565C0),
       backgroundColor: Colors.white,
       child: ListView.separated(
+        key: PageStorageKey('list_${widget.tabType}'),
         controller: widget.controller,
         physics: const AlwaysScrollableScrollPhysics(),
         keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
@@ -680,6 +717,7 @@ class _OrderListState extends State<_OrderList>
           return _PremiumOrderCard(
             key: ValueKey(order['id'].toString()),
             order: order,
+            tabType: widget.tabType,
             onCancel: widget.onCancel,
             isHighlighted: isHighlighted,
           );
@@ -689,13 +727,16 @@ class _OrderListState extends State<_OrderList>
   }
 }
 
+// ============================================================================
+// ✅ THE PERFECT GEOMETRY SKELETON
+// ============================================================================
 class _SkeletonOrderCard extends StatelessWidget {
   const _SkeletonOrderCard();
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      height: 240, // 🔒 EXACT SKELETON LOCK
+      height: 290, // 🚀 UPDATED: Taller Parent Card
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(16),
@@ -704,9 +745,9 @@ class _SkeletonOrderCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // 🚀 FLUID HEADER
           Container(
-            height: 46,
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
             decoration: BoxDecoration(
                 color: Colors.grey.shade50,
                 borderRadius: const BorderRadius.only(
@@ -734,14 +775,15 @@ class _SkeletonOrderCard extends StatelessWidget {
             ),
           ),
           const Divider(height: 1, thickness: 1, color: Color(0xFFF0F0F0)),
+          // 🚀 FLUID BODY (Expanded acts as a shock absorber)
           Expanded(
             child: Padding(
               padding: const EdgeInsets.all(14),
               child: Row(
                 children: [
                   Container(
-                      height: 90,
-                      width: 90,
+                      height: 110, // 🚀 UPDATED: Larger skeleton image
+                      width: 110,
                       decoration: BoxDecoration(
                           color: Colors.grey.shade200,
                           borderRadius: BorderRadius.circular(12))),
@@ -767,9 +809,9 @@ class _SkeletonOrderCard extends StatelessWidget {
             ),
           ),
           const Divider(height: 1, thickness: 1, color: Color(0xFFF0F0F0)),
-          Container(
-            height: 60,
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          // 🚀 FLUID FOOTER
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
@@ -784,7 +826,7 @@ class _SkeletonOrderCard extends StatelessWidget {
                   ],
                 ),
                 Container(
-                    height: 36,
+                    height: 38,
                     width: 120,
                     decoration: BoxDecoration(
                         color: Colors.grey.shade200,
@@ -799,16 +841,18 @@ class _SkeletonOrderCard extends StatelessWidget {
 }
 
 // ============================================================================
-// ✅ THE UNCOMPROMISED PREMIUM CARD (HARDWARE GEOMETRY LOCKED)
+// ✅ THE UNCOMPROMISED PREMIUM BUYER CARD (HARDWARE GEOMETRY LOCKED)
 // ============================================================================
 class _PremiumOrderCard extends StatelessWidget {
   final Map<String, dynamic> order;
+  final String tabType;
   final Function(String) onCancel;
   final bool isHighlighted;
 
   const _PremiumOrderCard({
     super.key,
     required this.order,
+    required this.tabType,
     required this.onCancel,
     this.isHighlighted = false,
   });
@@ -906,264 +950,295 @@ class _PremiumOrderCard extends StatelessWidget {
     }
 
     return RepaintBoundary(
-      child: GestureDetector(
-        onTap: isAccepted
-            ? () => Navigator.push(
-                context,
-                MaterialPageRoute(
-                    builder: (_) => BuyerOrderDetailScreen(orderId: fullId)))
-            : null,
-        child: Container(
-          height: 240, // 🔒 EXACT HARDWARE GEOMETRY LOCK
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(
+      child: Container(
+        height: 290, // 🚀 UPDATED: Taller Parent Card
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+              color: isHighlighted
+                  ? const Color(0xFF1565C0)
+                  : Colors.grey.shade200,
+              width: isHighlighted ? 2.5 : 1),
+          boxShadow: [
+            BoxShadow(
                 color: isHighlighted
-                    ? const Color(0xFF1565C0)
-                    : Colors.grey.shade200,
-                width: isHighlighted ? 2.5 : 1),
-            boxShadow: [
-              BoxShadow(
-                  color: isHighlighted
-                      ? const Color(0xFF1565C0).withOpacity(0.15)
-                      : Colors.black.withOpacity(0.03),
-                  blurRadius: isHighlighted ? 20 : 15,
-                  offset: const Offset(0, 6))
-            ],
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Container(
-                height: 46, // 🔒 Fixed
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                decoration: BoxDecoration(
-                  color: isHighlighted
-                      ? const Color(0xFF1565C0).withOpacity(0.05)
-                      : Colors.grey.shade50,
-                  borderRadius: const BorderRadius.only(
-                      topLeft: Radius.circular(15),
-                      topRight: Radius.circular(15)),
-                ),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Expanded(
-                      child: Row(
-                        children: [
-                          CircleAvatar(
-                              radius: 12,
-                              backgroundColor:
-                                  const Color(0xFF1565C0).withOpacity(0.1),
+                    ? const Color(0xFF1565C0).withOpacity(0.15)
+                    : Colors.black.withOpacity(0.03),
+                blurRadius: isHighlighted ? 20 : 15,
+                offset: const Offset(0, 6))
+          ],
+        ),
+        child: Material(
+          color: Colors.transparent,
+          borderRadius: BorderRadius.circular(16),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(16),
+            onTap: isAccepted
+                ? () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                        builder: (_) =>
+                            BuyerOrderDetailScreen(orderId: fullId)))
+                : null,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // 🚀 FLUID HEADER
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: isHighlighted
+                        ? const Color(0xFF1565C0).withOpacity(0.05)
+                        : Colors.grey.shade50,
+                    borderRadius: const BorderRadius.only(
+                        topLeft: Radius.circular(15),
+                        topRight: Radius.circular(15)),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Expanded(
+                        child: Row(
+                          children: [
+                            CircleAvatar(
+                                radius: 12,
+                                backgroundColor:
+                                    const Color(0xFF1565C0).withOpacity(0.1),
+                                child: Text(
+                                    farmerName.isNotEmpty
+                                        ? farmerName[0].toUpperCase()
+                                        : "F",
+                                    style: GoogleFonts.poppins(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.bold,
+                                        color: const Color(0xFF1565C0)))),
+                            const SizedBox(width: 8),
+                            Expanded(
                               child: Text(
                                   farmerName.isNotEmpty
-                                      ? farmerName[0].toUpperCase()
-                                      : "F",
+                                      ? farmerName
+                                      : "Unknown Farmer",
                                   style: GoogleFonts.poppins(
-                                      fontSize: 11,
+                                      fontSize: 14, // 🚀 Increased font
                                       fontWeight: FontWeight.bold,
-                                      color: const Color(0xFF1565C0)))),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                                farmerName.isNotEmpty
-                                    ? farmerName
-                                    : "Unknown Farmer",
-                                style: GoogleFonts.poppins(
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.bold,
-                                    color: Colors.black87),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 4),
-                      decoration: BoxDecoration(
-                          color: statusBg,
-                          borderRadius: BorderRadius.circular(100)),
-                      child: Row(
-                        children: [
-                          Icon(statusIcon, size: 10, color: statusColor),
-                          const SizedBox(width: 4),
-                          Text(displayStatus,
-                              style: GoogleFonts.poppins(
-                                  color: statusColor,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 9,
-                                  letterSpacing: 0.5)),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const Divider(height: 1, thickness: 1, color: Color(0xFFF0F0F0)),
-              Expanded(
-                // 🔒 Absorbs the remaining space flawlessly
-                child: Padding(
-                  padding: const EdgeInsets.all(14),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.center,
-                    children: [
-                      SizedBox(
-                        height: 90,
-                        width: 90,
-                        child: Container(
-                          decoration: BoxDecoration(
-                            color: Colors.grey.shade100,
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(color: Colors.grey.shade200),
-                          ),
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(11),
-                            child: Hero(
-                              tag: 'order_img_$fullId',
-                              child: (imgUrl != null && imgUrl.isNotEmpty)
-                                  ? CachedNetworkImage(
-                                      imageUrl: imgUrl.startsWith('http')
-                                          ? imgUrl
-                                          : Supabase.instance.client.storage
-                                              .from('crop_images')
-                                              .getPublicUrl(imgUrl),
-                                      fit: BoxFit.cover,
-                                      memCacheWidth: 250,
-                                      memCacheHeight: 250,
-                                      fadeInDuration:
-                                          const Duration(milliseconds: 150),
-                                      placeholder: (c, u) => Container(
-                                          color: Colors.grey.shade100),
-                                      errorWidget: (context, url, error) =>
-                                          const Icon(Icons.image_not_supported,
-                                              color: Colors.grey),
-                                    )
-                                  : Image.asset(
-                                      'assets/images/placeholder_crop.png',
-                                      fit: BoxFit.cover),
+                                      color: Colors.black87),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis),
                             ),
-                          ),
+                          ],
                         ),
                       ),
-                      const SizedBox(width: 14),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisAlignment: MainAxisAlignment.center,
+                      const SizedBox(width: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                            color: statusBg,
+                            borderRadius: BorderRadius.circular(100)),
+                        child: Row(
                           children: [
-                            Text(displayCropName,
+                            Icon(statusIcon, size: 10, color: statusColor),
+                            const SizedBox(width: 4),
+                            Text(displayStatus,
                                 style: GoogleFonts.poppins(
-                                    fontSize: 16,
+                                    color: statusColor,
                                     fontWeight: FontWeight.bold,
-                                    color: Colors.black87,
-                                    letterSpacing: -0.5,
-                                    height: 1.2),
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis),
-                            const SizedBox(height: 8),
-                            Row(
-                              crossAxisAlignment: CrossAxisAlignment.baseline,
-                              textBaseline: TextBaseline.alphabetic,
-                              children: [
-                                Text(formattedPrice,
-                                    style: GoogleFonts.poppins(
-                                        fontSize: 16,
-                                        fontWeight: FontWeight.bold,
-                                        color: Colors.black87)),
-                                const SizedBox(width: 6),
-                                Text("•  $qty kg",
-                                    style: GoogleFonts.poppins(
-                                        fontSize: 12,
-                                        fontWeight: FontWeight.w500,
-                                        color: Colors.grey.shade600)),
-                              ],
-                            ),
+                                    fontSize: 10, // 🚀 Adjusted Size
+                                    letterSpacing: 0.5)),
                           ],
                         ),
                       ),
                     ],
                   ),
                 ),
-              ),
-              const Divider(height: 1, thickness: 1, color: Color(0xFFF0F0F0)),
-              Container(
-                height: 60, // 🔒 Fixed
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text("Ordered: $orderDate",
-                              style: GoogleFonts.poppins(
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w600,
-                                  color: Colors.grey.shade600)),
-                          const SizedBox(height: 2),
-                          Text(orderIdDisplay,
-                              style: GoogleFonts.jetBrainsMono(
-                                  fontSize: 10,
-                                  color: Colors.grey.shade400,
-                                  fontWeight: FontWeight.w500)),
-                        ],
-                      ),
+                const Divider(
+                    height: 1, thickness: 1, color: Color(0xFFF0F0F0)),
+                // 🚀 FLUID BODY (Expanded absorbs variations)
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.all(14),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        SizedBox(
+                          height: 110, // 🚀 UPDATED: Larger Crop Image
+                          width: 110,
+                          child: Container(
+                            decoration: BoxDecoration(
+                              color: Colors.grey.shade100,
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: Colors.grey.shade200),
+                            ),
+                            child: Material(
+                              color: Colors.transparent,
+                              borderRadius: BorderRadius.circular(11),
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(11),
+                                // 🔒 LOOPHOLE CLOSED: Unique Hero Tag per Tab
+                                child: Hero(
+                                  tag: 'buyer_order_img_${tabType}_$fullId',
+                                  child: (imgUrl != null && imgUrl.isNotEmpty)
+                                      ? CachedNetworkImage(
+                                          imageUrl: imgUrl.startsWith('http')
+                                              ? imgUrl
+                                              : Supabase.instance.client.storage
+                                                  .from('crop_images')
+                                                  .getPublicUrl(imgUrl),
+                                          fit: BoxFit.cover,
+                                          memCacheWidth: 300,
+                                          memCacheHeight: 300,
+                                          fadeInDuration:
+                                              const Duration(milliseconds: 150),
+                                          placeholder: (c, u) => Container(
+                                              color: Colors.grey.shade100),
+                                          errorWidget: (context, url, error) =>
+                                              const Icon(
+                                                  Icons.image_not_supported,
+                                                  color: Colors.grey),
+                                        )
+                                      : Image.asset(
+                                          'assets/images/placeholder_crop.png',
+                                          fit: BoxFit.cover),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Flexible(
+                                child: Text(displayCropName,
+                                    style: GoogleFonts.poppins(
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.bold,
+                                        color: Colors.black87,
+                                        letterSpacing: -0.5,
+                                        height: 1.2),
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis),
+                              ),
+                              const SizedBox(height: 8),
+                              Row(
+                                crossAxisAlignment: CrossAxisAlignment.baseline,
+                                textBaseline: TextBaseline.alphabetic,
+                                children: [
+                                  Text(formattedPrice,
+                                      style: GoogleFonts.poppins(
+                                          fontSize: 18, // 🚀 Increased Size
+                                          fontWeight: FontWeight.bold,
+                                          color: Colors.black87)),
+                                  const SizedBox(width: 6),
+                                  Text("•  $qty kg",
+                                      style: GoogleFonts.poppins(
+                                          fontSize: 13, // 🚀 Increased Size
+                                          fontWeight: FontWeight.w500,
+                                          color: Colors.grey.shade600)),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                        if (isAccepted)
+                          Padding(
+                            padding: const EdgeInsets.only(left: 8.0),
+                            child: Icon(Icons.arrow_forward_ios_rounded,
+                                color: Colors.grey.shade400, size: 16),
+                          ),
+                      ],
                     ),
-                    if (isAccepted)
-                      ElevatedButton(
-                        onPressed: () => Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                                builder: (_) =>
-                                    BuyerOrderDetailScreen(orderId: fullId))),
-                        style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF1565C0),
-                            elevation: 0,
-                            minimumSize: const Size(120, 36),
-                            shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(100)),
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 16, vertical: 0)),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
+                  ),
+                ),
+                const Divider(
+                    height: 1, thickness: 1, color: Color(0xFFF0F0F0)),
+                // 🚀 FLUID FOOTER
+                Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text("View Details",
+                            Text("Ordered: $orderDate",
                                 style: GoogleFonts.poppins(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.bold,
-                                    color: Colors.white)),
-                            const SizedBox(width: 4),
-                            const Icon(Icons.arrow_forward_rounded,
-                                size: 12, color: Colors.white)
+                                    fontSize: 12, // 🚀 Scaled up
+                                    fontWeight: FontWeight.w600,
+                                    color: Colors.grey.shade600)),
+                            const SizedBox(height: 2),
+                            // 🚀 HIGHLIGHTED, HIGH-CONTRAST ORDER ID PILL
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFE3F2FD),
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Text(orderIdDisplay,
+                                  style: GoogleFonts.jetBrainsMono(
+                                      fontSize:
+                                          11, // 🚀 Increased Order ID Font
+                                      color: const Color(0xFF1565C0),
+                                      fontWeight: FontWeight.w700)),
+                            ),
                           ],
                         ),
-                      )
-                    else if (isPending)
-                      TextButton(
-                        onPressed: () => onCancel(fullId),
-                        style: TextButton.styleFrom(
-                            foregroundColor: Colors.red.shade700,
-                            backgroundColor: Colors.red.shade50,
-                            minimumSize: const Size(0, 36),
-                            shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(100)),
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 16, vertical: 0)),
-                        child: Text("Cancel Order",
-                            style: GoogleFonts.poppins(
-                                fontSize: 12, fontWeight: FontWeight.bold)),
-                      )
-                  ],
+                      ),
+                      if (isAccepted)
+                        ElevatedButton(
+                          onPressed: () => Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                  builder: (_) =>
+                                      BuyerOrderDetailScreen(orderId: fullId))),
+                          style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFF1565C0),
+                              elevation: 0,
+                              minimumSize:
+                                  const Size(120, 38), // 🚀 Safe button height
+                              shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(100)),
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 16, vertical: 0)),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Text("View Details",
+                                  style: GoogleFonts.poppins(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.white)),
+                            ],
+                          ),
+                        )
+                      else if (isPending)
+                        TextButton(
+                          onPressed: () => onCancel(fullId),
+                          style: TextButton.styleFrom(
+                              foregroundColor: Colors.red.shade700,
+                              backgroundColor: Colors.red.shade50,
+                              minimumSize:
+                                  const Size(0, 38), // 🚀 Safe button height
+                              shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(100)),
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 16, vertical: 0)),
+                          child: Text("Cancel Order",
+                              style: GoogleFonts.poppins(
+                                  fontSize: 12, fontWeight: FontWeight.bold)),
+                        )
+                    ],
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),

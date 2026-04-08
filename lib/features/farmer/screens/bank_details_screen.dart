@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart'; // 🚀 Added for Haptics & Formatters
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:google_fonts/google_fonts.dart'; // ✅ Added typography
+import 'package:google_fonts/google_fonts.dart';
 import 'package:agriyukt_app/features/common/services/bank_verification_service.dart';
 
 class BankDetailsScreen extends StatefulWidget {
@@ -19,7 +20,8 @@ class _BankDetailsScreenState extends State<BankDetailsScreen> {
   final _ifscCtrl = TextEditingController();
   final _bankNameCtrl = TextEditingController();
 
-  bool _isLoading = false;
+  bool _isLoading = true; // 🚀 Start true to show loader while fetching
+  bool _isSaving = false;
 
   // Theme Colors
   final Color _primaryGreen = const Color(0xFF1B5E20);
@@ -41,7 +43,10 @@ class _BankDetailsScreenState extends State<BankDetailsScreen> {
 
   Future<void> _fetchExistingDetails() async {
     final user = _supabase.auth.currentUser;
-    if (user == null) return;
+    if (user == null) {
+      if (mounted) setState(() => _isLoading = false);
+      return;
+    }
 
     try {
       final data = await _supabase
@@ -60,17 +65,26 @@ class _BankDetailsScreenState extends State<BankDetailsScreen> {
       }
     } catch (e) {
       debugPrint("Fetch error: $e");
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
     }
   }
 
   Future<void> _saveDetails() async {
-    if (!_formKey.currentState!.validate()) return;
+    if (_isSaving) return; // 🚀 Prevent double taps
+    if (!_formKey.currentState!.validate()) {
+      HapticFeedback.vibrate();
+      return;
+    }
 
     final String ifsc = _ifscCtrl.text.trim().toUpperCase();
     final String accNum = _accountNumberCtrl.text.trim();
 
     final syntaxError = BankVerificationService.validateSyntax(ifsc, accNum);
     if (syntaxError != null) {
+      HapticFeedback.vibrate();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
             content: Text("❌ $syntaxError", style: GoogleFonts.poppins()),
@@ -79,7 +93,7 @@ class _BankDetailsScreenState extends State<BankDetailsScreen> {
       return;
     }
 
-    setState(() => _isLoading = true);
+    setState(() => _isSaving = true);
 
     final user = _supabase.auth.currentUser;
     if (user == null) return;
@@ -87,35 +101,40 @@ class _BankDetailsScreenState extends State<BankDetailsScreen> {
     try {
       await _supabase.from('bank_accounts').upsert({
         'user_id': user.id,
-        'account_holder_name': _accountNameCtrl.text.trim(),
+        'account_holder_name':
+            _accountNameCtrl.text.trim().toUpperCase(), // 🚀 Standardize
         'account_number': accNum,
         'ifsc_code': ifsc,
-        'bank_name': _bankNameCtrl.text.trim(),
+        'bank_name': _bankNameCtrl.text.trim().toUpperCase(), // 🚀 Standardize
         'updated_at': DateTime.now().toIso8601String(),
       });
 
       await _supabase.from('profiles').update({
         'meta_data': {
-          'bank_name': _bankNameCtrl.text.trim(),
+          'bank_name': _bankNameCtrl.text.trim().toUpperCase(),
           'account_number': accNum,
           'ifsc_code': ifsc,
         }
       }).eq('id', user.id);
 
       if (mounted) {
+        HapticFeedback.mediumImpact();
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
             content: Text("✅ Bank Details Linked & Verified!",
-                style: GoogleFonts.poppins()),
+                style: GoogleFonts.poppins(fontWeight: FontWeight.bold)),
             backgroundColor: Colors.green));
-        Navigator.pop(context);
+        Navigator.pop(context,
+            true); // 🚀 Return true to trigger refresh on previous screen
       }
     } catch (e) {
+      HapticFeedback.vibrate();
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text("Error: $e"), backgroundColor: Colors.red));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text("Error saving details. Check connection."),
+            backgroundColor: Colors.red));
       }
     } finally {
-      if (mounted) setState(() => _isLoading = false);
+      if (mounted) setState(() => _isSaving = false);
     }
   }
 
@@ -130,57 +149,67 @@ class _BankDetailsScreenState extends State<BankDetailsScreen> {
         foregroundColor: Colors.white,
         elevation: 0,
       ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(24),
-        child: Form(
-          key: _formKey,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text("Payout Account",
-                  style: GoogleFonts.poppins(
-                      fontSize: 22,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.black87)),
-              const SizedBox(height: 8),
-              Text("Earnings will be transferred to this account.",
-                  style: GoogleFonts.poppins(color: Colors.grey, fontSize: 14)),
-              const SizedBox(height: 30),
-              _buildInput("Account Holder Name", _accountNameCtrl,
-                  Icons.person_outline),
-              _buildInput("Account Number", _accountNumberCtrl, Icons.numbers,
-                  isNumber: true),
-              _buildInput("IFSC Code", _ifscCtrl, Icons.qr_code_scanner,
-                  hint: "e.g. SBIN0001234"),
-              _buildInput(
-                  "Bank Name", _bankNameCtrl, Icons.account_balance_outlined,
-                  hint: "e.g. HDFC Bank"),
-              const SizedBox(height: 30),
-              SizedBox(
-                width: double.infinity,
-                height: 55,
-                child: ElevatedButton(
-                  onPressed: _isLoading ? null : _saveDetails,
-                  style: ElevatedButton.styleFrom(
-                      backgroundColor: _primaryGreen,
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12)),
-                      elevation: 4),
-                  child: _isLoading
-                      ? const CircularProgressIndicator(color: Colors.white)
-                      : Text("VERIFY & SAVE DETAILS",
-                          style: GoogleFonts.poppins(
-                              color: Colors.white,
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold)),
+      body: _isLoading
+          ? Center(child: CircularProgressIndicator(color: _primaryGreen))
+          : SingleChildScrollView(
+              physics: const BouncingScrollPhysics(),
+              padding: const EdgeInsets.all(24),
+              child: Form(
+                key: _formKey,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text("Payout Account",
+                        style: GoogleFonts.poppins(
+                            fontSize: 22,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.black87)),
+                    const SizedBox(height: 8),
+                    Text("Earnings will be transferred to this account.",
+                        style: GoogleFonts.poppins(
+                            color: Colors.grey, fontSize: 14)),
+                    const SizedBox(height: 30),
+
+                    _buildInput("Account Holder Name", _accountNameCtrl,
+                        Icons.person_outline),
+                    // 🚀 Added numeric formatter
+                    _buildInput(
+                        "Account Number", _accountNumberCtrl, Icons.numbers,
+                        isNumber: true),
+                    _buildInput("IFSC Code", _ifscCtrl, Icons.qr_code_scanner,
+                        hint: "e.g. SBIN0001234"),
+                    _buildInput("Bank Name", _bankNameCtrl,
+                        Icons.account_balance_outlined,
+                        hint: "e.g. HDFC Bank"),
+
+                    const SizedBox(height: 30),
+
+                    SizedBox(
+                      width: double.infinity,
+                      height: 55,
+                      child: ElevatedButton(
+                        onPressed: _isSaving ? null : _saveDetails,
+                        style: ElevatedButton.styleFrom(
+                            backgroundColor: _primaryGreen,
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12)),
+                            elevation: 4),
+                        child: _isSaving
+                            ? const CircularProgressIndicator(
+                                color: Colors.white)
+                            : Text("VERIFY & SAVE DETAILS",
+                                style: GoogleFonts.poppins(
+                                    color: Colors.white,
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.bold)),
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+                    _buildSecurityNote(),
+                  ],
                 ),
               ),
-              const SizedBox(height: 24),
-              _buildSecurityNote(),
-            ],
-          ),
-        ),
-      ),
+            ),
     );
   }
 
@@ -192,6 +221,10 @@ class _BankDetailsScreenState extends State<BankDetailsScreen> {
       child: TextFormField(
         controller: controller,
         keyboardType: isNumber ? TextInputType.number : TextInputType.text,
+        textInputAction: TextInputAction.next, // 🚀 UX: Move to next field
+        // 🚀 PRODUCTION: Strict numeric formatting for Account Number
+        inputFormatters:
+            isNumber ? [FilteringTextInputFormatter.digitsOnly] : [],
         textCapitalization:
             !isNumber ? TextCapitalization.characters : TextCapitalization.none,
         style: GoogleFonts.poppins(fontWeight: FontWeight.w500),
@@ -213,7 +246,12 @@ class _BankDetailsScreenState extends State<BankDetailsScreen> {
           contentPadding:
               const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
         ),
-        validator: (val) => val!.isEmpty ? "Required" : null,
+        validator: (val) {
+          if (val == null || val.trim().isEmpty) return "$label is required";
+          if (isNumber && val.length < 9)
+            return "Invalid account number length";
+          return null;
+        },
       ),
     );
   }

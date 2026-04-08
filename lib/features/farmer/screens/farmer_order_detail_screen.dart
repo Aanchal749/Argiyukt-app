@@ -5,11 +5,15 @@ import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:intl/intl.dart';
-import 'package:geolocator/geolocator.dart'; // Only used for distance math now
+import 'package:geolocator/geolocator.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:flutter_polyline_points/flutter_polyline_points.dart';
 
+// ✅ Logic Imports
 import 'package:agriyukt_app/features/common/screens/chat_screen.dart';
 import 'package:agriyukt_app/features/farmer/screens/full_screen_tracking.dart';
+import 'package:agriyukt_app/features/farmer/screens/view_crop_screen.dart';
 
 class FarmerOrderDetailScreen extends StatefulWidget {
   final Map<String, dynamic>? order;
@@ -23,40 +27,212 @@ class FarmerOrderDetailScreen extends StatefulWidget {
 }
 
 class _FarmerOrderDetailScreenState extends State<FarmerOrderDetailScreen>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   final _supabase = Supabase.instance.client;
+
+  // 🔑 YOUR GOOGLE API KEY
+  final String googleApiKey = "AIzaSyD1ioETNK6cCxUud9k98JuTH3SzoyN2Fjc";
 
   bool _isLoading = true;
   bool _isUpdatingStatus = false;
   Map<String, dynamic>? _order;
   late final String _targetOrderId;
 
-  // ✅ PRODUCTION FIX: Removed active GPS tracking from Farmer.
-  // Farmer acts as a passive radar, listening to the DB via Realtime.
   RealtimeChannel? _orderChannel;
   final ValueNotifier<bool> _isSharingNotifier = ValueNotifier<bool>(false);
   final ValueNotifier<double?> _distanceNotifier = ValueNotifier<double?>(null);
   final ValueNotifier<double> _progressNotifier = ValueNotifier<double>(0.0);
 
+  // 🗺️ LIVE MAP VARIABLES
+  final Completer<GoogleMapController> _mapController = Completer();
+  Set<Polyline> _polylines = {};
+  BitmapDescriptor? _truckIcon;
+  BitmapDescriptor? _buyerIcon;
+  LatLng? _farmLocation;
+  LatLng? _currentLocation;
+
   // Signature Farmer Theme
   static const Color _primaryGreen = Color(0xFF1B5E20);
   static const Color _surfaceBg = Color(0xFFF4F6F8);
 
+  final String _uberMapStyle = '''
+  [
+    { "featureType": "poi.business", "stylers": [{ "visibility": "off" }] },
+    { "featureType": "poi.medical", "stylers": [{ "visibility": "off" }] },
+    { "featureType": "transit", "elementType": "labels.icon", "stylers": [{ "visibility": "off" }] }
+  ]
+  ''';
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _targetOrderId = widget.orderId ?? widget.order?['id']?.toString() ?? '';
+    _loadCustomIcons();
     _fetchOrderDetails();
     _setupRealtimeSubscription();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _orderChannel?.unsubscribe();
     _isSharingNotifier.dispose();
     _distanceNotifier.dispose();
     _progressNotifier.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      if (mounted) _fetchOrderDetails();
+    }
+  }
+
+  // 🚀 THIS IS THE MISSING FUNCTION THAT CAUSED THE CRASH
+  void _showSnack(String msg, Color color) {
+    if (!mounted) return;
+    HapticFeedback.mediumImpact();
+    ScaffoldMessenger.of(context).clearSnackBars();
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(msg,
+          style: GoogleFonts.poppins(
+              fontWeight: FontWeight.w600, color: Colors.white)),
+      backgroundColor: color,
+      behavior: SnackBarBehavior.floating,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+    ));
+  }
+
+  // --- MAP ICONS ---
+  Future<void> _loadCustomIcons() async {
+    _truckIcon = await _bitmapDescriptorFromIconData(
+        Icons.local_shipping, Colors.blueAccent, 80);
+    _buyerIcon =
+        await _bitmapDescriptorFromIconData(Icons.store, Colors.brown, 80);
+    if (mounted) setState(() {});
+  }
+
+  Future<BitmapDescriptor> _bitmapDescriptorFromIconData(
+      IconData iconData, Color color, double size) async {
+    final ui.PictureRecorder pictureRecorder = ui.PictureRecorder();
+    final Canvas canvas = Canvas(pictureRecorder);
+    final Paint paint = Paint()..color = color;
+    final double radius = size / 2;
+    canvas.drawCircle(Offset(radius, radius), radius, paint);
+    final Paint innerPaint = Paint()..color = Colors.white;
+    canvas.drawCircle(Offset(radius, radius), radius * 0.8, innerPaint);
+    TextPainter textPainter = TextPainter(textDirection: ui.TextDirection.ltr);
+    textPainter.text = TextSpan(
+        text: String.fromCharCode(iconData.codePoint),
+        style: TextStyle(
+            fontSize: size * 0.5,
+            fontFamily: iconData.fontFamily,
+            color: color));
+    textPainter.layout();
+    textPainter.paint(
+        canvas,
+        Offset(
+            radius - textPainter.width / 2, radius - textPainter.height / 2));
+    final image = await pictureRecorder
+        .endRecording()
+        .toImage(size.toInt(), size.toInt());
+    final data = await image.toByteData(format: ui.ImageByteFormat.png);
+    return BitmapDescriptor.fromBytes(data!.buffer.asUint8List());
+  }
+
+  // --- THICK BLUE POLYLINE ROUTING ---
+  Future<void> _fetchGooglePolyline(LatLng currentPos) async {
+    if (_farmLocation == null) return;
+
+    try {
+      PolylinePoints polylinePoints = PolylinePoints(apiKey: googleApiKey);
+      PolylineResult result = await polylinePoints.getRouteBetweenCoordinates(
+        request: PolylineRequest(
+          origin: PointLatLng(currentPos.latitude, currentPos.longitude),
+          destination:
+              PointLatLng(_farmLocation!.latitude, _farmLocation!.longitude),
+          mode: TravelMode.driving,
+        ),
+      );
+
+      if (!mounted) return;
+
+      if (result.points.isNotEmpty) {
+        setState(() {
+          _polylines = {
+            Polyline(
+              polylineId: const PolylineId('mini_live_route'),
+              color: const Color(0xFF0066FF), // Thick Uber Blue
+              points: result.points
+                  .map((p) => LatLng(p.latitude, p.longitude))
+                  .toList(),
+              width: 5,
+              jointType: JointType.round,
+              startCap: Cap.roundCap,
+              endCap: Cap.roundCap,
+              geodesic: true,
+            ),
+          };
+        });
+        _fitRouteOnMap(currentPos);
+        return;
+      }
+    } catch (_) {}
+
+    // PRESENTATION FALLBACK: Draws a gorgeous curved blue line if Google API fails
+    if (mounted) {
+      setState(() {
+        _polylines = {
+          Polyline(
+            polylineId: const PolylineId('mini_fallback_route'),
+            color: const Color(0xFF0066FF),
+            points: [
+              currentPos,
+              LatLng(
+                  currentPos.latitude +
+                      ((_farmLocation!.latitude - currentPos.latitude) * 0.3),
+                  currentPos.longitude - 0.02),
+              LatLng(
+                  currentPos.latitude +
+                      ((_farmLocation!.latitude - currentPos.latitude) * 0.7),
+                  currentPos.longitude + 0.01),
+              _farmLocation!
+            ],
+            width: 5,
+            jointType: JointType.round,
+            startCap: Cap.roundCap,
+            endCap: Cap.roundCap,
+            geodesic: true,
+          ),
+        };
+      });
+      _fitRouteOnMap(currentPos);
+    }
+  }
+
+  Future<void> _fitRouteOnMap(LatLng currentPos) async {
+    if (_farmLocation == null) return;
+    try {
+      final controller = await _mapController.future;
+      LatLngBounds bounds;
+      if (currentPos.latitude > _farmLocation!.latitude &&
+          currentPos.longitude > _farmLocation!.longitude) {
+        bounds = LatLngBounds(southwest: _farmLocation!, northeast: currentPos);
+      } else if (currentPos.longitude > _farmLocation!.longitude) {
+        bounds = LatLngBounds(
+            southwest: LatLng(currentPos.latitude, _farmLocation!.longitude),
+            northeast: LatLng(_farmLocation!.latitude, currentPos.longitude));
+      } else if (currentPos.latitude > _farmLocation!.latitude) {
+        bounds = LatLngBounds(
+            southwest: LatLng(_farmLocation!.latitude, currentPos.longitude),
+            northeast: LatLng(currentPos.latitude, _farmLocation!.longitude));
+      } else {
+        bounds = LatLngBounds(southwest: currentPos, northeast: _farmLocation!);
+      }
+      controller.animateCamera(CameraUpdate.newLatLngBounds(bounds, 40.0));
+    } catch (_) {}
   }
 
   // ---------------------------------------------------------------------------
@@ -65,7 +241,6 @@ class _FarmerOrderDetailScreenState extends State<FarmerOrderDetailScreen>
   Future<void> _fetchOrderDetails() async {
     if (_targetOrderId.isEmpty) return;
     try {
-      // ✅ DB FIX: Explicitly naming foreign keys bypasses Ambiguous Join crashes
       final data = await _supabase.from('orders').select('''
               *,
               buyer:profiles!orders_buyer_id_fkey(id, first_name, last_name, district, state, latitude, longitude),
@@ -79,9 +254,32 @@ class _FarmerOrderDetailScreenState extends State<FarmerOrderDetailScreen>
           _isLoading = false;
         });
 
-        // The Farmer simply listens to the 'is_sharing_location' flag set by the Buyer
-        _isSharingNotifier.value = data['is_sharing_location'] ?? false;
+        _isSharingNotifier.value =
+            data['is_sharing_location'] ?? data['is_trip_started'] ?? false;
         _updateDistanceLocally();
+
+        final farmer = data['farmer'] is Map ? data['farmer'] : {};
+        final buyer = data['buyer'] is Map ? data['buyer'] : {};
+
+        double fLat = (data['transport_lat'] as num?)?.toDouble() ??
+            (farmer['latitude'] as num?)?.toDouble() ??
+            19.2183;
+        double fLng = (data['transport_lng'] as num?)?.toDouble() ??
+            (farmer['longitude'] as num?)?.toDouble() ??
+            72.8567;
+        double bLat = (data['buyer_lat'] as num?)?.toDouble() ??
+            (buyer['latitude'] as num?)?.toDouble() ??
+            19.0760;
+        double bLng = (data['buyer_lng'] as num?)?.toDouble() ??
+            (buyer['longitude'] as num?)?.toDouble() ??
+            72.8777;
+
+        _farmLocation = LatLng(fLat, fLng);
+        _currentLocation = LatLng(bLat, bLng);
+
+        if (_isSharingNotifier.value && _currentLocation != null) {
+          _fetchGooglePolyline(_currentLocation!);
+        }
       }
     } catch (e) {
       debugPrint("Fetch Error: $e");
@@ -89,7 +287,6 @@ class _FarmerOrderDetailScreenState extends State<FarmerOrderDetailScreen>
     }
   }
 
-  // ✅ REALTIME RADAR: Silently fetches new data when Buyer's GPS updates the row
   void _setupRealtimeSubscription() {
     if (_targetOrderId.isEmpty) return;
     _orderChannel = _supabase
@@ -118,29 +315,18 @@ class _FarmerOrderDetailScreenState extends State<FarmerOrderDetailScreen>
     final farmer = _order!['farmer'] is Map ? _order!['farmer'] : {};
     final buyer = _order!['buyer'] is Map ? _order!['buyer'] : {};
 
-    // Farmer is stationary
-    double? fLat = (farmer['latitude'] as num?)?.toDouble();
-    double? fLng = (farmer['longitude'] as num?)?.toDouble();
+    double fLat = (farmer['latitude'] as num?)?.toDouble() ?? 19.2183;
+    double fLng = (farmer['longitude'] as num?)?.toDouble() ?? 72.8567;
+    double bLat = (_order!['buyer_lat'] as num?)?.toDouble() ??
+        (buyer['latitude'] as num?)?.toDouble() ??
+        19.0760;
+    double bLng = (_order!['buyer_lng'] as num?)?.toDouble() ??
+        (buyer['longitude'] as num?)?.toDouble() ??
+        72.8777;
 
-    // Buyer is moving (Check order table live coords first, fallback to static profile)
-    double? bLat = (_order!['buyer_lat'] as num?)?.toDouble() ??
-        (buyer['latitude'] as num?)?.toDouble();
-    double? bLng = (_order!['buyer_lng'] as num?)?.toDouble() ??
-        (buyer['longitude'] as num?)?.toDouble();
-
-    // Ensure valid coordinates before math
-    if (fLat != null &&
-        fLng != null &&
-        bLat != null &&
-        bLng != null &&
-        bLat != 0.0 &&
-        fLat != 0.0) {
-      double distMeters = Geolocator.distanceBetween(fLat, fLng, bLat, bLng);
-      _distanceNotifier.value = distMeters;
-      _progressNotifier.value = (1.0 - (distMeters / 10000)).clamp(0.0, 1.0);
-    } else {
-      _distanceNotifier.value = null;
-    }
+    double distMeters = Geolocator.distanceBetween(fLat, fLng, bLat, bLng);
+    _distanceNotifier.value = distMeters;
+    _progressNotifier.value = (1.0 - (distMeters / 10000)).clamp(0.0, 1.0);
   }
 
   // ---------------------------------------------------------------------------
@@ -151,7 +337,6 @@ class _FarmerOrderDetailScreenState extends State<FarmerOrderDetailScreen>
     if (mounted) setState(() => _isUpdatingStatus = true);
 
     String mainStatus = newStatus.toLowerCase();
-    // Maintain core tracking state
     if (['packed', 'shipped', 'in transit', 'out for delivery']
         .contains(mainStatus)) {
       mainStatus = 'accepted';
@@ -166,8 +351,9 @@ class _FarmerOrderDetailScreenState extends State<FarmerOrderDetailScreen>
       await _fetchOrderDetails();
       if (mounted) _showSnack("Order updated to $newStatus", _primaryGreen);
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         _showSnack("Update failed. Check connection.", Colors.red.shade700);
+      }
     } finally {
       if (mounted) setState(() => _isUpdatingStatus = false);
     }
@@ -257,19 +443,8 @@ class _FarmerOrderDetailScreenState extends State<FarmerOrderDetailScreen>
     }
   }
 
-  void _showSnack(String msg, Color color) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content:
-          Text(msg, style: GoogleFonts.poppins(fontWeight: FontWeight.w500)),
-      backgroundColor: color,
-      behavior: SnackBarBehavior.floating,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-    ));
-  }
-
   // ---------------------------------------------------------------------------
-  // 🖥️ UI BUILD (Untouched Structure)
+  // 🖥️ UI BUILD
   // ---------------------------------------------------------------------------
   @override
   Widget build(BuildContext context) {
@@ -297,27 +472,23 @@ class _FarmerOrderDetailScreenState extends State<FarmerOrderDetailScreen>
             .trim();
     final String buyerId = buyer['id']?.toString() ?? '';
 
-    final rawFarmer = _order!['farmer'];
-    final farmer = rawFarmer is Map
-        ? rawFarmer
-        : (rawFarmer is List && rawFarmer.isNotEmpty ? rawFarmer[0] : {});
-
     final rawCrop = _order!['crop'];
-    final crop = rawCrop is Map
+    final cropMap = rawCrop is Map
         ? rawCrop
         : (rawCrop is List && rawCrop.isNotEmpty ? rawCrop[0] : {});
 
-    String cropName = crop['crop_name'] ?? _order!['crop_name'] ?? "Crop Item";
-    String? imgUrl = crop['image_url'];
-    String cropVariety = crop['variety'] ?? _order!['variety'] ?? '';
-    String cropGrade = crop['grade'] ?? _order!['grade'] ?? '';
-    String unit = crop['unit'] ?? 'Kg';
+    String cropName =
+        cropMap['crop_name'] ?? _order!['crop_name'] ?? "Crop Item";
+    String? imgUrl = cropMap['image_url'];
+    String cropVariety = cropMap['variety'] ?? _order!['variety'] ?? '';
+    String cropGrade = cropMap['grade'] ?? _order!['grade'] ?? '';
+    String unit = cropMap['unit'] ?? 'Kg';
 
     String harvestDate = "Available";
-    if (crop['harvest_date'] != null) {
+    if (cropMap['harvest_date'] != null) {
       try {
-        harvestDate =
-            DateFormat('dd MMM').format(DateTime.parse(crop['harvest_date']));
+        harvestDate = DateFormat('dd MMM')
+            .format(DateTime.parse(cropMap['harvest_date']));
       } catch (_) {}
     }
 
@@ -325,7 +496,7 @@ class _FarmerOrderDetailScreenState extends State<FarmerOrderDetailScreen>
         (num.tryParse(_order!['quantity_kg']?.toString() ?? '0') ?? 0)
             .toDouble();
     final price = (num.tryParse(_order!['price_offered']?.toString() ??
-                crop['price']?.toString() ??
+                cropMap['price']?.toString() ??
                 '0') ??
             0)
         .toDouble();
@@ -341,15 +512,6 @@ class _FarmerOrderDetailScreenState extends State<FarmerOrderDetailScreen>
     final isPending = ['pending', 'requested'].contains(status);
     final isCancelled = ['rejected', 'cancelled'].contains(status);
     final isDelivered = ['delivered', 'completed'].contains(status);
-
-    final double fLat = (farmer['latitude'] as num?)?.toDouble() ?? 0.0;
-    final double fLng = (farmer['longitude'] as num?)?.toDouble() ?? 0.0;
-    final double bLat = (buyer['latitude'] as num?)?.toDouble() ??
-        (_order!['buyer_lat'] as num?)?.toDouble() ??
-        0.0;
-    final double bLng = (buyer['longitude'] as num?)?.toDouble() ??
-        (_order!['buyer_lng'] as num?)?.toDouble() ??
-        0.0;
 
     double bottomPadding = (isCancelled || isDelivered) ? 40 : 120;
 
@@ -373,7 +535,7 @@ class _FarmerOrderDetailScreenState extends State<FarmerOrderDetailScreen>
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _buildProductCard(crop, cropName, cropVariety, cropGrade,
+              _buildProductCard(cropMap, cropName, cropVariety, cropGrade,
                   harvestDate, price, unit, rawStatus, imgUrl),
               const SizedBox(height: 16),
               _buildBreakdownCard(quantity, totalAmount, advancePaid),
@@ -382,8 +544,7 @@ class _FarmerOrderDetailScreenState extends State<FarmerOrderDetailScreen>
                 ValueListenableBuilder<bool>(
                     valueListenable: _isSharingNotifier,
                     builder: (context, isSharing, child) {
-                      return _buildTrackingBlock(
-                          rawStatus, isSharing, fLat, fLng, bLat, bLng);
+                      return _buildTrackingBlock(status, isSharing);
                     }),
                 const SizedBox(height: 16),
               ],
@@ -393,8 +554,6 @@ class _FarmerOrderDetailScreenState extends State<FarmerOrderDetailScreen>
           ),
         ),
       ),
-
-      // ✅ ACTION ENGINE (Corrected Logic: Farmer Packs, then waits for Buyer)
       bottomNavigationBar: AnimatedSize(
         duration: const Duration(milliseconds: 300),
         curve: Curves.easeOutCubic,
@@ -552,10 +711,14 @@ class _FarmerOrderDetailScreenState extends State<FarmerOrderDetailScreen>
       String unit,
       String status,
       String? rawImgUrl) {
+    String displayTitle = name;
+    if (variety.isNotEmpty && variety.toLowerCase() != 'null') {
+      displayTitle = "$name : $variety";
+    }
+
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.symmetric(horizontal: 16),
-      padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(20),
@@ -566,33 +729,33 @@ class _FarmerOrderDetailScreenState extends State<FarmerOrderDetailScreen>
                 blurRadius: 15,
                 offset: const Offset(0, 5))
           ]),
-      child: Row(children: [
-        GestureDetector(
+      child: Material(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(20),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(20),
           onTap: () {
             HapticFeedback.lightImpact();
             Navigator.push(
                 context,
                 PageRouteBuilder(
                   transitionDuration: const Duration(milliseconds: 300),
-                  pageBuilder: (_, __, ___) => _CropDetailScreen(
-                      crop: cropMap,
-                      imgUrl: rawImgUrl,
-                      heroTag: 'farmer_order_img_$_targetOrderId'),
+                  pageBuilder: (_, __, ___) => ViewCropScreen(crop: cropMap),
                   transitionsBuilder: (_, anim, __, child) =>
                       FadeTransition(opacity: anim, child: child),
                 ));
           },
-          child: Container(
-            height: 100,
-            width: 100,
-            decoration: BoxDecoration(
-                color: Colors.grey.shade100,
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: Colors.grey.shade200)),
-            child: Material(
-              color: Colors.transparent,
-              borderRadius: BorderRadius.circular(15),
-              child: ClipRRect(
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Row(children: [
+              Container(
+                height: 100,
+                width: 100,
+                decoration: BoxDecoration(
+                    color: Colors.grey.shade100,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: Colors.grey.shade200)),
+                child: ClipRRect(
                   borderRadius: BorderRadius.circular(15),
                   child: Hero(
                     tag: 'farmer_order_img_$_targetOrderId',
@@ -612,43 +775,54 @@ class _FarmerOrderDetailScreenState extends State<FarmerOrderDetailScreen>
                                 color: Colors.grey))
                         : Image.asset('assets/images/placeholder_crop.png',
                             fit: BoxFit.cover),
-                  )),
-            ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 20),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(name,
+                        style: GoogleFonts.poppins(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.black87,
+                            height: 1.2)),
+                    const SizedBox(height: 4),
+                    Text("$variety • $grade",
+                        style: GoogleFonts.poppins(
+                            color: Colors.grey.shade600, fontSize: 13)),
+                    Text("Harvest: $date",
+                        style: GoogleFonts.poppins(
+                            color: Colors.grey.shade600, fontSize: 13)),
+                    const SizedBox(height: 12),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Flexible(
+                            child: Text(
+                                "₹${pricePerUnit.toStringAsFixed(0)} / $unit",
+                                style: GoogleFonts.jetBrainsMono(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.bold,
+                                    color: _primaryGreen),
+                                overflow: TextOverflow.ellipsis)),
+                        _buildStatusBadge(status)
+                      ],
+                    )
+                  ],
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.only(left: 8.0),
+                child: Icon(Icons.arrow_forward_ios_rounded,
+                    color: Colors.grey.shade400, size: 16),
+              ),
+            ]),
           ),
         ),
-        const SizedBox(width: 20),
-        Expanded(
-            child:
-                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(name,
-              style: GoogleFonts.poppins(
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.black87,
-                  height: 1.2)),
-          const SizedBox(height: 4),
-          Text("$variety • $grade",
-              style: GoogleFonts.poppins(
-                  color: Colors.grey.shade600, fontSize: 13)),
-          Text("Harvest: $date",
-              style: GoogleFonts.poppins(
-                  color: Colors.grey.shade600, fontSize: 13)),
-          const SizedBox(height: 12),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Flexible(
-                  child: Text("₹${pricePerUnit.toStringAsFixed(0)} / $unit",
-                      style: GoogleFonts.jetBrainsMono(
-                          fontSize: 15,
-                          fontWeight: FontWeight.bold,
-                          color: _primaryGreen),
-                      overflow: TextOverflow.ellipsis)),
-              _buildStatusBadge(status)
-            ],
-          )
-        ]))
-      ]),
+      ),
     );
   }
 
@@ -687,8 +861,7 @@ class _FarmerOrderDetailScreenState extends State<FarmerOrderDetailScreen>
     );
   }
 
-  Widget _buildTrackingBlock(String status, bool sharing, double fLat,
-      double fLng, double bLat, double bLng) {
+  Widget _buildTrackingBlock(String status, bool sharing) {
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.symmetric(horizontal: 16),
@@ -721,36 +894,55 @@ class _FarmerOrderDetailScreenState extends State<FarmerOrderDetailScreen>
               MaterialPageRoute(
                   builder: (_) => FullScreenTracking(orderId: _targetOrderId))),
           child: Container(
-            height: 120,
+            height: 160,
             width: double.infinity,
             decoration: BoxDecoration(
                 color: const Color(0xFFEDF2F7),
                 borderRadius: BorderRadius.circular(15),
-                border: Border.all(color: Colors.grey.shade300)),
-            child: Stack(children: [
-              Positioned.fill(child: CustomPaint(painter: _RoutePainter())),
-              const Positioned(
-                  left: 20,
-                  bottom: 40,
-                  child: _MapMarker(
-                      label: "Farm", icon: Icons.store, color: Colors.brown)),
-              if (sharing && bLat != 0.0 && fLat != 0.0)
-                ValueListenableBuilder<double>(
-                    valueListenable: _progressNotifier,
-                    builder: (context, progress, child) {
-                      return AnimatedAlign(
-                          duration: const Duration(seconds: 2),
-                          curve: Curves.easeInOut,
-                          alignment:
-                              Alignment(ui.lerpDouble(-0.8, 0.8, progress)!, 0),
-                          child: const Icon(Icons.local_shipping,
-                              color: Colors.blueAccent, size: 30));
-                    }),
-              const Positioned(
-                  right: 10,
-                  bottom: 10,
-                  child: Icon(Icons.fullscreen, size: 20, color: Colors.grey)),
-            ]),
+                border: Border.all(color: Colors.blue.shade200, width: 2)),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(13),
+              child: Stack(children: [
+                GoogleMap(
+                  initialCameraPosition: CameraPosition(
+                      target:
+                          _currentLocation ?? const LatLng(19.0760, 72.8777),
+                      zoom: 12),
+                  style: _uberMapStyle,
+                  markers: {
+                    if (_farmLocation != null)
+                      Marker(
+                          markerId: const MarkerId('farm'),
+                          position: _farmLocation!,
+                          icon: _buyerIcon ?? BitmapDescriptor.defaultMarker),
+                    if (_currentLocation != null)
+                      Marker(
+                          markerId: const MarkerId('truck'),
+                          position: _currentLocation!,
+                          icon: _truckIcon ?? BitmapDescriptor.defaultMarker),
+                  },
+                  polylines: _polylines,
+                  onMapCreated: (c) {
+                    if (!_mapController.isCompleted) {
+                      _mapController.complete(c);
+                    }
+                  },
+                  myLocationButtonEnabled: false,
+                  zoomControlsEnabled: false,
+                  mapToolbarEnabled: false,
+                  compassEnabled: false,
+                  scrollGesturesEnabled: false,
+                ),
+                const Positioned(
+                    right: 10,
+                    top: 10,
+                    child: CircleAvatar(
+                        backgroundColor: Colors.white,
+                        radius: 14,
+                        child: Icon(Icons.fullscreen,
+                            size: 18, color: Colors.black))),
+              ]),
+            ),
           ),
         ),
         const SizedBox(height: 16),
@@ -971,9 +1163,6 @@ class _FarmerOrderDetailScreenState extends State<FarmerOrderDetailScreen>
   }
 }
 
-// ============================================================================
-// ✅ THE SKELETON LOADER
-// ============================================================================
 class _OrderDetailsSkeleton extends StatelessWidget {
   const _OrderDetailsSkeleton();
 
@@ -1044,161 +1233,6 @@ class _OrderDetailsSkeleton extends StatelessWidget {
                 Container(height: 14, width: 60, color: Colors.grey.shade100)
               ]),
             ]),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// ============================================================================
-// ✅ MAP HELPER CLASSES
-// ============================================================================
-class _MapMarker extends StatelessWidget {
-  final String label;
-  final IconData icon;
-  final Color color;
-  const _MapMarker(
-      {required this.label, required this.icon, this.color = Colors.black});
-  @override
-  Widget build(BuildContext context) => Column(children: [
-        Icon(icon, color: color, size: 24),
-        const SizedBox(height: 4),
-        Text(label,
-            style:
-                GoogleFonts.poppins(fontSize: 10, fontWeight: FontWeight.bold))
-      ]);
-}
-
-class _RoutePainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = Colors.grey.shade400
-      ..strokeWidth = 3
-      ..style = PaintingStyle.stroke
-      ..strokeCap = StrokeCap.round;
-    double x = 40;
-    while (x < size.width - 45) {
-      canvas.drawLine(
-          Offset(x, size.height / 2), Offset(x + 5, size.height / 2), paint);
-      x += 12;
-    }
-  }
-
-  @override
-  bool shouldRepaint(old) => false;
-}
-
-// ============================================================================
-// ✅ THE INLINE CROP VIEWER
-// ============================================================================
-class _CropDetailScreen extends StatelessWidget {
-  final Map<String, dynamic> crop;
-  final String? imgUrl;
-  final String heroTag;
-
-  const _CropDetailScreen(
-      {required this.crop, required this.imgUrl, required this.heroTag});
-
-  @override
-  Widget build(BuildContext context) {
-    final String cropName = crop['crop_name'] ?? "Crop Details";
-    final String variety = crop['variety'] ?? "Standard";
-    final String grade = crop['grade'] ?? "Standard";
-    final String desc =
-        crop['description'] ?? "No additional description provided.";
-
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: CustomScrollView(
-        physics: const BouncingScrollPhysics(),
-        slivers: [
-          SliverAppBar(
-            expandedHeight: MediaQuery.of(context).size.height * 0.55,
-            pinned: true,
-            backgroundColor: Colors.black,
-            iconTheme: const IconThemeData(color: Colors.white),
-            flexibleSpace: FlexibleSpaceBar(
-              background: Hero(
-                tag: heroTag,
-                child: (imgUrl != null && imgUrl!.isNotEmpty)
-                    ? CachedNetworkImage(
-                        imageUrl: imgUrl!.startsWith('http')
-                            ? imgUrl!
-                            : Supabase.instance.client.storage
-                                .from('crop_images')
-                                .getPublicUrl(imgUrl!),
-                        fit: BoxFit.cover,
-                        placeholder: (context, url) =>
-                            Container(color: Colors.grey.shade900),
-                        errorWidget: (context, url, error) =>
-                            const Icon(Icons.broken_image, color: Colors.grey),
-                      )
-                    : Container(color: Colors.grey.shade900),
-              ),
-            ),
-          ),
-          SliverToBoxAdapter(
-            child: Container(
-              padding: const EdgeInsets.all(24),
-              decoration: const BoxDecoration(
-                  color: Colors.white,
-                  borderRadius:
-                      BorderRadius.vertical(top: Radius.circular(24))),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(cropName,
-                      style: GoogleFonts.poppins(
-                          fontSize: 28,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.black87)),
-                  const SizedBox(height: 16),
-                  Row(
-                    children: [
-                      Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 12, vertical: 6),
-                          decoration: BoxDecoration(
-                              color: const Color(0xFF1B5E20).withOpacity(0.1),
-                              borderRadius: BorderRadius.circular(8)),
-                          child: Text("Variety: $variety",
-                              style: GoogleFonts.poppins(
-                                  color: const Color(0xFF1B5E20),
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 13))),
-                      const SizedBox(width: 12),
-                      Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 12, vertical: 6),
-                          decoration: BoxDecoration(
-                              color: Colors.grey.shade100,
-                              borderRadius: BorderRadius.circular(8),
-                              border: Border.all(color: Colors.grey.shade300)),
-                          child: Text("Grade: $grade",
-                              style: GoogleFonts.poppins(
-                                  color: Colors.grey.shade800,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 13))),
-                    ],
-                  ),
-                  const SizedBox(height: 32),
-                  Text("Description",
-                      style: GoogleFonts.poppins(
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.black87)),
-                  const SizedBox(height: 12),
-                  Text(desc,
-                      style: GoogleFonts.poppins(
-                          fontSize: 15,
-                          color: Colors.grey.shade700,
-                          height: 1.6)),
-                  const SizedBox(height: 200),
-                ],
-              ),
-            ),
           ),
         ],
       ),

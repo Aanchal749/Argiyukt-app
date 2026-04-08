@@ -5,24 +5,23 @@ import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:agriyukt_app/core/providers/language_provider.dart';
-import 'package:agriyukt_app/features/farmer/farmer_translations.dart';
 
-class MarketIntelligenceSection extends StatefulWidget {
-  final String farmerId;
+class BuyerMarketIntelligence extends StatefulWidget {
+  final String buyerId;
   final Color themeColor;
 
-  const MarketIntelligenceSection({
+  const BuyerMarketIntelligence({
     super.key,
-    required this.farmerId,
-    this.themeColor = const Color(0xFF1B5E20),
+    required this.buyerId,
+    this.themeColor = const Color(0xFF1565C0), // Buyer Blue
   });
 
   @override
-  State<MarketIntelligenceSection> createState() =>
-      _MarketIntelligenceSectionState();
+  State<BuyerMarketIntelligence> createState() =>
+      _BuyerMarketIntelligenceState();
 }
 
-class _MarketIntelligenceSectionState extends State<MarketIntelligenceSection>
+class _BuyerMarketIntelligenceState extends State<BuyerMarketIntelligence>
     with SingleTickerProviderStateMixin {
   final _supabase = Supabase.instance.client;
   bool _isLoading = true;
@@ -36,7 +35,7 @@ class _MarketIntelligenceSectionState extends State<MarketIntelligenceSection>
     _pulseController = AnimationController(
         vsync: this, duration: const Duration(milliseconds: 1000))
       ..repeat(reverse: true);
-    _fetchCloudPredictions();
+    _fetchMarketData();
   }
 
   @override
@@ -45,17 +44,13 @@ class _MarketIntelligenceSectionState extends State<MarketIntelligenceSection>
     super.dispose();
   }
 
-  String _text(String key, String fallback) {
-    String translated = FarmerText.get(context, key);
-    return translated == key ? fallback : translated;
-  }
-
   String _normalizeCropName(String name) {
     if (name.isEmpty) return "";
     String trimmed = name.trim().toLowerCase();
     return "${trimmed[0].toUpperCase()}${trimmed.substring(1)}";
   }
 
+  // 🚀 Format to clean, lowercase units for the small suffix
   String _formatUnit(String? rawUnit) {
     if (rawUnit == null || rawUnit.isEmpty) return "kg";
     String lower = rawUnit.toLowerCase().trim();
@@ -63,25 +58,6 @@ class _MarketIntelligenceSectionState extends State<MarketIntelligenceSection>
     if (lower == 'kilogram' || lower == 'kg') return "kg";
     if (lower == 'ton' || lower == 'tonne') return "ton";
     return lower;
-  }
-
-  bool _isCropMatch(String farmerCrop, String aiCrop) {
-    String f = farmerCrop.toLowerCase().trim();
-    String a = aiCrop.toLowerCase().trim();
-
-    if (f == a) return true;
-
-    if ((f.contains('okra') ||
-            f.contains('ladyfinger') ||
-            f.contains('bhindi')) &&
-        (a.contains('okra') ||
-            a.contains('ladyfinger') ||
-            a.contains('bhindi'))) {
-      return true;
-    }
-    if (f.contains(a) || a.contains(f)) return true;
-
-    return false;
   }
 
   String _formatUpdatedTime(String? isoString) {
@@ -94,7 +70,7 @@ class _MarketIntelligenceSectionState extends State<MarketIntelligenceSection>
     }
   }
 
-  Future<void> _fetchCloudPredictions() async {
+  Future<void> _fetchMarketData() async {
     if (mounted) {
       setState(() {
         _isLoading = true;
@@ -111,38 +87,43 @@ class _MarketIntelligenceSectionState extends State<MarketIntelligenceSection>
     }
 
     try {
-      final farmerCrops = await _supabase
-          .from('crops')
-          .select()
-          .eq('farmer_id', widget.farmerId)
-          .neq('status', 'Archived')
+      // 1. Fetch exactly what the buyer has in their Watchlist/Favorites
+      final likedResponse = await _supabase
+          .from('favorites')
+          .select('crop:crops(*)')
+          .eq('user_id', widget.buyerId)
           .timeout(const Duration(seconds: 10));
 
-      Map<String, String> cropImageMap = {};
-      Map<String, String> cropVarietyMap = {};
-      List<String> myRawCrops = [];
+      List<String> targetCropsQuery = [];
+      Map<String, String> varietyMap = {};
+      Map<String, String> imageMap = {};
 
-      if (farmerCrops != null && farmerCrops.isNotEmpty) {
-        for (var row in farmerCrops) {
-          if (row['crop_name'] != null) {
-            String rawName = row['crop_name'].toString().trim();
-            if (!myRawCrops.contains(rawName)) myRawCrops.add(rawName);
+      if (likedResponse != null && (likedResponse as List).isNotEmpty) {
+        for (var item in likedResponse) {
+          final crop = item['crop'];
+          if (crop != null && crop['crop_name'] != null) {
+            String originalName = crop['crop_name'].toString().trim();
+            String nameLower = originalName.toLowerCase();
 
-            if (row['image_url'] != null &&
-                row['image_url'].toString().isNotEmpty) {
-              cropImageMap[rawName] = row['image_url'].toString();
+            if (!targetCropsQuery.contains(originalName)) {
+              targetCropsQuery.add(originalName);
             }
 
-            String variety = row['crop_variety']?.toString() ??
-                row['variety']?.toString() ??
-                row['crop_type']?.toString() ??
-                'Standard';
-            cropVarietyMap[rawName] = variety;
+            String variety = crop['variety']?.toString() ??
+                crop['crop_type']?.toString() ??
+                '';
+            varietyMap[nameLower] = variety;
+
+            if (crop['image_url'] != null &&
+                crop['image_url'].toString().isNotEmpty) {
+              imageMap[nameLower] = crop['image_url'].toString();
+            }
           }
         }
       }
 
-      if (myRawCrops.isEmpty) {
+      // 2. STRICT PERSONALIZATION: If Watchlist is empty, stop and show Empty State
+      if (targetCropsQuery.isEmpty) {
         if (mounted) {
           setState(() {
             _marketData = [];
@@ -152,40 +133,35 @@ class _MarketIntelligenceSectionState extends State<MarketIntelligenceSection>
         return;
       }
 
+      // 3. Fetch AI Predictions ONLY for the Watchlist crops
       final aiResponse = await _supabase
           .from('market_predictions')
           .select()
+          .inFilter('crop_name', targetCropsQuery)
           .timeout(const Duration(seconds: 10));
 
-      List<Map<String, dynamic>> mergedData = [];
+      // 4. Merge Data
+      List<Map<String, dynamic>> finalData = [];
 
       for (var data in aiResponse) {
         Map<String, dynamic> item = Map<String, dynamic>.from(data);
-        String aiCropName = item['crop_name']?.toString() ?? '';
+        String dbCropName = (item['crop_name'] ?? '').toString().trim();
+        String dbCropLower = dbCropName.toLowerCase();
 
-        String? matchedFarmerCrop;
-        for (String fCrop in myRawCrops) {
-          if (_isCropMatch(fCrop, aiCropName)) {
-            matchedFarmerCrop = fCrop;
-            break;
-          }
-        }
+        item['personal_image'] = imageMap[dbCropLower] ?? '';
+        item['personal_variety'] = varietyMap[dbCropLower] ?? '';
 
-        if (matchedFarmerCrop != null) {
-          item['personal_image'] = cropImageMap[matchedFarmerCrop] ?? '';
-          item['personal_variety'] = cropVarietyMap[matchedFarmerCrop] ?? '';
-          mergedData.add(item);
-        }
+        finalData.add(item);
       }
 
       if (mounted) {
         setState(() {
-          _marketData = mergedData;
+          _marketData = finalData;
           _isLoading = false;
         });
       }
     } catch (e) {
-      debugPrint("🚨 Farmer AI Fetch Error: $e");
+      debugPrint("🚨 Buyer Market Intelligence Error: $e");
       if (mounted) {
         setState(() {
           _isLoading = false;
@@ -221,7 +197,7 @@ class _MarketIntelligenceSectionState extends State<MarketIntelligenceSection>
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Text("My Wholesale Market",
+                  Text("My Watchlist Market",
                       style: GoogleFonts.poppins(
                           fontSize: 22,
                           fontWeight: FontWeight.bold,
@@ -254,7 +230,7 @@ class _MarketIntelligenceSectionState extends State<MarketIntelligenceSection>
 
     if (_hasError) return _buildErrorState();
     if (_isLoading) return _buildSkeleton();
-    if (_marketData.isEmpty) return _buildNoInventoryState();
+    if (_marketData.isEmpty) return _buildEmptyState();
 
     final previewData = _marketData.take(3).toList();
 
@@ -304,13 +280,15 @@ class _MarketIntelligenceSectionState extends State<MarketIntelligenceSection>
                   ],
                 ),
                 IconButton(
-                    onPressed: _fetchCloudPredictions,
+                    onPressed: _fetchMarketData,
                     icon: Icon(Icons.refresh,
                         size: 22, color: Colors.grey.shade400))
               ],
             ),
           ),
           const SizedBox(height: 12),
+
+          // 🚀 HEIGHT INCREASED TO 240
           SizedBox(
             height: 240,
             child: ListView.builder(
@@ -321,7 +299,9 @@ class _MarketIntelligenceSectionState extends State<MarketIntelligenceSection>
               itemBuilder: (context, i) => _buildPredictionCard(_marketData[i]),
             ),
           ),
+
           const SizedBox(height: 36),
+
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: Row(
@@ -336,6 +316,7 @@ class _MarketIntelligenceSectionState extends State<MarketIntelligenceSection>
             ),
           ),
           const SizedBox(height: 20),
+
           ListView.builder(
             padding: const EdgeInsets.symmetric(horizontal: 16),
             physics: const NeverScrollableScrollPhysics(),
@@ -344,6 +325,7 @@ class _MarketIntelligenceSectionState extends State<MarketIntelligenceSection>
             itemBuilder: (context, index) =>
                 _buildLivePriceTile(previewData[index]),
           ),
+
           if (_marketData.length > 3)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -358,7 +340,7 @@ class _MarketIntelligenceSectionState extends State<MarketIntelligenceSection>
                           width: 1.5),
                       shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(16))),
-                  child: Text("View All Live Prices",
+                  child: Text("View All My Watchlist Data",
                       style: GoogleFonts.poppins(
                           color: widget.themeColor,
                           fontWeight: FontWeight.bold,
@@ -373,7 +355,12 @@ class _MarketIntelligenceSectionState extends State<MarketIntelligenceSection>
 
   Widget _buildPredictionCard(Map<String, dynamic> data) {
     final bool isUpward = data['is_upward'] == true;
-    final int decimals = (data['predicted_price'] ?? 0) < 100 ? 1 : 0;
+    final double predictedPrice =
+        double.tryParse(data['predicted_price']?.toString() ?? '0') ?? 0.0;
+    final double trendPercent =
+        double.tryParse(data['trend_percent']?.toString() ?? '0') ?? 0.0;
+
+    final int decimals = predictedPrice < 100 ? 1 : 0;
     final String imageUrl = data['personal_image'] ?? '';
     final String emoji = data['emoji'] ?? '🌱';
     final String cropName = _normalizeCropName(data['crop_name'] ?? 'Crop');
@@ -443,7 +430,7 @@ class _MarketIntelligenceSectionState extends State<MarketIntelligenceSection>
                       style: GoogleFonts.poppins(
                         color: Colors.black87,
                         fontWeight: FontWeight.bold,
-                        fontSize: 14,
+                        fontSize: 13,
                       ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
@@ -460,7 +447,7 @@ class _MarketIntelligenceSectionState extends State<MarketIntelligenceSection>
                       textBaseline: TextBaseline.alphabetic,
                       children: [
                         Text(
-                          "₹${(data['predicted_price'] ?? 0).toStringAsFixed(decimals)}",
+                          "₹${predictedPrice.toStringAsFixed(decimals)}",
                           style: GoogleFonts.jetBrainsMono(
                             color: Colors.white,
                             fontSize: 28,
@@ -490,7 +477,7 @@ class _MarketIntelligenceSectionState extends State<MarketIntelligenceSection>
                 ),
                 Container(
                   padding:
-                      const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                   decoration: BoxDecoration(
                     color: Colors.white.withOpacity(0.25),
                     borderRadius: BorderRadius.circular(100),
@@ -499,10 +486,10 @@ class _MarketIntelligenceSectionState extends State<MarketIntelligenceSection>
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       Icon(isUpward ? Icons.trending_up : Icons.trending_down,
-                          color: Colors.white, size: 16),
-                      const SizedBox(width: 6),
+                          color: Colors.white, size: 14),
+                      const SizedBox(width: 4),
                       Text(
-                        "${(data['trend_percent'] ?? 0).toStringAsFixed(1)}%",
+                        "${trendPercent.toStringAsFixed(1)}%",
                         style: GoogleFonts.poppins(
                           color: Colors.white,
                           fontWeight: FontWeight.bold,
@@ -520,11 +507,13 @@ class _MarketIntelligenceSectionState extends State<MarketIntelligenceSection>
     );
   }
 
-  // =================================================================
-  // 🚀 REDESIGNED LIVE PRICE TILE: No Blocky Price Box, Bigger Crop
-  // =================================================================
   Widget _buildLivePriceTile(Map<String, dynamic> data) {
-    int decimals = (data['live_price'] ?? 0) < 100 ? 1 : 0;
+    final double livePrice =
+        double.tryParse(data['live_price']?.toString() ?? '0') ?? 0.0;
+    final double predictedPrice =
+        double.tryParse(data['predicted_price']?.toString() ?? '0') ?? 0.0;
+
+    int decimals = livePrice < 100 ? 1 : 0;
     String formattedTime = _formatUpdatedTime(data['last_updated']?.toString());
     String imageUrl = data['personal_image'] ?? '';
     String emoji = data['emoji'] ?? '🌱';
@@ -537,8 +526,7 @@ class _MarketIntelligenceSectionState extends State<MarketIntelligenceSection>
 
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.symmetric(
-          horizontal: 14, vertical: 14), // 🚀 Balanced Padding
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(20),
@@ -554,9 +542,9 @@ class _MarketIntelligenceSectionState extends State<MarketIntelligenceSection>
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          // 🚀 MASSIVE CROP IMAGE (68px instead of 50px)
-          _buildCropAvatar(imageUrl, emoji, 68, isRound: false),
-          const SizedBox(width: 16),
+          _buildCropAvatar(imageUrl, emoji, 68,
+              isRound: false), // 🚀 Massive 68px Crop Image
+          const SizedBox(width: 12),
 
           Expanded(
             child: Column(
@@ -590,8 +578,6 @@ class _MarketIntelligenceSectionState extends State<MarketIntelligenceSection>
             ),
           ),
 
-          // 🚀 REMOVED THE "BLOCKY" BACKGROUND BOX
-          // Now it blends seamlessly with the tile like a premium list
           Column(
             crossAxisAlignment: CrossAxisAlignment.end,
             mainAxisSize: MainAxisSize.min,
@@ -603,10 +589,9 @@ class _MarketIntelligenceSectionState extends State<MarketIntelligenceSection>
                   textBaseline: TextBaseline.alphabetic,
                   children: [
                     Text(
-                      "₹${(data['live_price'] ?? 0).toStringAsFixed(decimals)}",
+                      "₹${livePrice.toStringAsFixed(decimals)}",
                       style: GoogleFonts.jetBrainsMono(
-                        fontSize:
-                            20, // 🚀 Larger price to compensate for no background
+                        fontSize: 20,
                         fontWeight: FontWeight.w800,
                         color: widget.themeColor,
                       ),
@@ -631,7 +616,7 @@ class _MarketIntelligenceSectionState extends State<MarketIntelligenceSection>
                       color: trendColor, size: 12),
                   const SizedBox(width: 4),
                   Text(
-                    "₹${(data['predicted_price'] ?? 0).toStringAsFixed(decimals)}",
+                    "₹${predictedPrice.toStringAsFixed(decimals)}",
                     style: GoogleFonts.poppins(
                       fontSize: 11,
                       fontWeight: FontWeight.bold,
@@ -647,7 +632,6 @@ class _MarketIntelligenceSectionState extends State<MarketIntelligenceSection>
     );
   }
 
-  // 🚀 FIXED BORDER RADIUS FOR LARGER IMAGES
   Widget _buildCropAvatar(String imageUrl, String emoji, double size,
       {bool isRound = false}) {
     if (imageUrl.isNotEmpty) {
@@ -707,10 +691,11 @@ class _MarketIntelligenceSectionState extends State<MarketIntelligenceSection>
         child: Text(emoji, style: TextStyle(fontSize: size * 0.55)));
   }
 
-  Widget _buildNoInventoryState() {
+  // 🚀 EMPTY WATCHLIST STATE
+  Widget _buildEmptyState() {
     return Container(
       width: double.infinity,
-      margin: const EdgeInsets.symmetric(horizontal: 16),
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
       padding: const EdgeInsets.all(32),
       decoration: BoxDecoration(
           color: Colors.white,
@@ -730,23 +715,24 @@ class _MarketIntelligenceSectionState extends State<MarketIntelligenceSection>
             decoration: BoxDecoration(
                 color: widget.themeColor.withOpacity(0.05),
                 shape: BoxShape.circle),
-            child: Icon(Icons.add_chart, size: 48, color: widget.themeColor),
+            child:
+                Icon(Icons.favorite_border, size: 48, color: widget.themeColor),
           ),
           const SizedBox(height: 20),
-          Text("No Crops Found",
+          Text("Empty Watchlist",
               style: GoogleFonts.poppins(
                   fontSize: 20,
                   fontWeight: FontWeight.bold,
                   color: Colors.black87)),
           const SizedBox(height: 8),
           Text(
-              "Add crops to your inventory to unlock the AI Market Prediction Dashboard.",
+              "Like a crop in the marketplace to instantly see its AI price prediction right here.",
               textAlign: TextAlign.center,
               style: GoogleFonts.poppins(
                   fontSize: 14, color: Colors.grey.shade600, height: 1.5)),
           const SizedBox(height: 24),
           ElevatedButton.icon(
-              onPressed: _fetchCloudPredictions,
+              onPressed: _fetchMarketData,
               style: ElevatedButton.styleFrom(
                   backgroundColor: widget.themeColor,
                   foregroundColor: Colors.white,
@@ -771,7 +757,7 @@ class _MarketIntelligenceSectionState extends State<MarketIntelligenceSection>
       Text("Cloud connection lost",
           style: GoogleFonts.poppins(color: Colors.grey.shade600)),
       TextButton(
-          onPressed: _fetchCloudPredictions,
+          onPressed: _fetchMarketData,
           child: Text("Retry",
               style: TextStyle(
                   color: widget.themeColor, fontWeight: FontWeight.bold)))

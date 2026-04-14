@@ -1,6 +1,6 @@
-\<div align="center"\>
-\<img src="[https://github.com/Aanchal749/Argiyukt-app/blob/7cc178ce4839c6cf2b142f1802aa08c1a4c3155a/agriyukt%20logo.jpeg)" alt="AgriYukt Logo" width="120"\>
-
+<div align="center">
+  <img src="https://raw.githubusercontent.com/Aanchal749/Argiyukt-app/7cc178ce4839c6cf2b142f1802aa08c1a4c3155a/agriyukt%20logo.jpeg" alt="AgriYukt Logo" width="120">
+</div>
 # 🌱 AgriYukt
 
 **The Smart Agriculture Marketplace Powered by AI & Trust**

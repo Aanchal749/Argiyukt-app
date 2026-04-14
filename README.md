@@ -123,12 +123,15 @@ AgriYukt democratizes the agricultural supply chain by providing a direct, verif
 
 ## 🎥 Video Demonstration
 
-Click the image below to watch the full product demonstration, showcasing the AI crop scanner and live verification flows.
+<p align="center">
+  <b>Click the image below to watch the full product demonstration, showcasing the AI crop scanner and live verification flows.</b>
+</p>
 
-[](https://www.google.com/search?q=%5Bhttps://www.youtube.com/watch%3Fv%3DYOUR_YOUTUBE_VIDEO_ID%5D\(https://www.youtube.com/watch%3Fv%3DYOUR_YOUTUBE_VIDEO_ID\))
-
-*(Note: Replace `YOUR_YOUTUBE_VIDEO_ID` with your actual video ID)*
-
+<p align="center">
+  <a href="https://youtu.be/yFVWkAY0X8E?si=iuzUhN9CJ6WCvwXN">
+    <img src="https://img.youtube.com/vi/yFVWkAY0X8E/0.jpg" alt="Watch Demo Video" width="70%">
+  </a>
+</p>
 -----
 
 ## ⚠️ Intellectual Property & Usage Note
@@ -147,7 +150,7 @@ Click the image below to watch the full product demonstration, showcasing the AI
 
   - 💼 [LinkedIn](https://www.google.com/search?q=https://linkedin.com/in/yourprofile)
   - 🐙 [GitHub](https://www.google.com/search?q=https://github.com/yourusername)
-  - 📧 Email: your.email@example.com
+  - 📧 Email: aanchalsingh5627448@gmail.com
 
 -----
 

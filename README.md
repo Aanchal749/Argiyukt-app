@@ -5,15 +5,26 @@
 
 **The Smart Agriculture Marketplace Powered by AI & Trust**
 
-[](https://www.google.com/search?q=https://flutter.dev/)
-[](https://www.google.com/search?q=https://supabase.io/)
-[](https://www.google.com/search?q=https://deepmind.google/technologies/gemini/)
-[](https://www.google.com/search?q=%23)
-
-[📱 Download APK](https://www.google.com/search?q=%23) • [🎥 Watch Demo Video](https://www.google.com/search?q=%23) • [🌐 Try Web Version](https://www.google.com/search?q=%23)
-
-\</div\>
-
+<p align="center">
+  <a href="https://play.google.com/store/apps/details?id=com.agriyukt.app">
+    <img src="https://cdn-icons-png.flaticon.com/512/888/888857.png" width="20"> Download on Play Store
+  </a>
+  &nbsp; • &nbsp;
+  
+  <a href="#">
+    <img src="https://cdn-icons-png.flaticon.com/512/1828/1828919.png" width="20"> Download APK
+  </a>
+  &nbsp; • &nbsp;
+  
+  <a href="https://youtu.be/yFVWkAY0X8E?si=iuzUhN9CJ6WCvwXN">
+    <img src="https://cdn-icons-png.flaticon.com/512/1384/1384060.png" width="20"> Watch Demo Video
+  </a>
+  &nbsp; • &nbsp;
+  
+  <a href="https://drive.google.com/file/d/1sxEJLTuhajXE7WNf1HzaknexGLmOAOT7/view?usp=drive_link">
+    <img src="https://cdn-icons-png.flaticon.com/512/2991/2991148.png" width="20"> Demo (Drive)
+  </a>
+</p>
 -----
 
 ## 🚀 Overview

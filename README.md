@@ -142,17 +142,17 @@ AgriYukt democratizes the agricultural supply chain by providing a direct, verif
     <img src="https://img.youtube.com/vi/yFVWkAY0X8E/0.jpg" alt="Watch Demo Video" width="70%">
   </a>
 </p>
------
+---
 
 ## ⚠️ Intellectual Property & Usage Note
 
 > **Copyright (c) 2026 AgriYukt Team. All Rights Reserved.**
 >
-> This public repository is provided strictly for evaluation, demonstration, and hackathon judging purposes. To protect our proprietary backend logic, AI instruction sets, and API credentials, some configuration files and backend deployment scripts have been explicitly omitted from this public build via `.gitignore`.
+> This public repository is shared strictly for evaluation, demonstration, and hackathon judging purposes. To safeguard proprietary backend logic, AI models, instruction sets, and API credentials, certain configuration files and deployment scripts have been intentionally excluded using `.gitignore`.
 >
-> **No permission is granted to copy, distribute, modify, or commercially utilize this source code without explicit written consent from the author.**
+> **No permission is granted to copy, reproduce, distribute, modify, or commercially use this source code, in whole or in part, without explicit written consent from the author.**
 
------
+---
 
 ## 👩‍💻 Authors
 

@@ -76,17 +76,30 @@ AgriYukt democratizes the agricultural supply chain by providing a direct, verif
 -----
 
 ## 🧪 Pilot Testing & Field Validation
+<p align="center"><b>We didn't just build this in a lab—we took it to the farmers.</b></p>
 
-We didn't just build this in a lab—we took it to the farmers.
+<div align="center">
+  <img src="https://raw.githubusercontent.com/Aanchal749/Argiyukt-app/e11f5ae581c3238114b72ca3dc0e981a99bb6502/apmc%20vashi.png" alt="APMC Vashi" width="48%">
+  
+  <img src="https://raw.githubusercontent.com/Aanchal749/Argiyukt-app/e11f5ae581c3238114b72ca3dc0e981a99bb6502/bhiwandi.jpg" alt="Bhiwandi Market" width="48%">
+</div>
 
-\<div align="center"\>
-\<img src="[https://via.placeholder.com/400x250.png?text=Farmer+Testing+1](https://www.google.com/search?q=https://via.placeholder.com/400x250.png%3Ftext%3DFarmer%2BTesting%2B1)" width="48%"\>
-\<img src="[https://via.placeholder.com/400x250.png?text=Mandi+Visit+2](https://www.google.com/search?q=https://via.placeholder.com/400x250.png%3Ftext%3DMandi%2BVisit%2B2)" width="48%"\>
-\</div\>
+<br>
 
-> *"AgriYukt's AI scanner saved us 10 minutes per listing. The DigiLocker verification immediately made buyers trust our produce."* — Local Farmer Feedback
+<div align="center">
+  <img src="https://raw.githubusercontent.com/Aanchal749/Argiyukt-app/e11f5ae581c3238114b72ca3dc0e981a99bb6502/dhanu.jpg" alt="Dhanu Farmer Interaction" width="48%">
+  
+  <img src="https://raw.githubusercontent.com/Aanchal749/Argiyukt-app/e11f5ae581c3238114b72ca3dc0e981a99bb6502/nashik.jpg" alt="Nashik Mandi Visit" width="48%">
+</div>
 
------
+<br>
+
+<p align="center">
+  <i>
+  "AgriYukt's AI scanner saved us 10 minutes per listing. The DigiLocker verification immediately made buyers trust our produce."
+  <br>— Local Farmer Feedback
+  </i>
+</p>
 
 ## 🎥 Video Demonstration
 

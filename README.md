@@ -11,11 +11,6 @@
   </a>
   &nbsp; • &nbsp;
   
-  <a href="#">
-    <img src="https://cdn-icons-png.flaticon.com/512/1828/1828919.png" width="20"> Download APK
-  </a>
-  &nbsp; • &nbsp;
-  
   <a href="https://youtu.be/yFVWkAY0X8E?si=iuzUhN9CJ6WCvwXN">
     <img src="https://cdn-icons-png.flaticon.com/512/1384/1384060.png" width="20"> Watch Demo Video
   </a>

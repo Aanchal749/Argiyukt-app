@@ -59,6 +59,13 @@ AgriYukt democratizes the agricultural supply chain by providing a direct, verif
 <div align="center">
   <img src="https://raw.githubusercontent.com/Aanchal749/Argiyukt-app/4defeea1e3fce8e2c67bb2f26778a8234af02733/market%20intelligence.jpeg" alt="Market Intelligence AI Prediction" width="30%">
 </div>
+<br>
+
+<p align="center"><b>All Screens Overview</b></p>
+
+<div align="center">
+  <img src="https://raw.githubusercontent.com/Aanchal749/Argiyukt-app/7e1219cf8682cb0ef9529e26b04eaef57886f4d9/all%20mockups.jpeg" alt="All App Screens Mockup" width="80%">
+</div>
 -----
 
 ## 🛠️ Technology Stack

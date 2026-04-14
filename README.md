@@ -1,9 +1,19 @@
-<div align="center">
+<p align="center">
   <img src="https://raw.githubusercontent.com/Aanchal749/Argiyukt-app/7cc178ce4839c6cf2b142f1802aa08c1a4c3155a/agriyukt%20logo.jpeg" alt="AgriYukt Logo" width="120">
-</div>
-# 🌱 AgriYukt
+</p>
 
-**The Smart Agriculture Marketplace Powered by AI & Trust**
+<h1 align="center">🌱 AgriYukt</h1>
+
+<p align="center">
+  <b>Digitizing the Agricultural Supply Chain</b><br>
+  <i>From farmer’s field to market — on time, every time.</i>
+</p>
+
+<p align="center">
+  <b>The Smart Agriculture Marketplace Powered by AI & Trust</b>
+</p>
+
+<br>
 
 <p align="center">
   <a href="https://play.google.com/store/apps/details?id=com.agriyukt.app">

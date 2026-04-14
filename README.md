@@ -149,7 +149,7 @@ AgriYukt democratizes the agricultural supply chain by providing a direct, verif
 **[Aanchal Chauhan]** *Lead Developer & System Architect*
 
   - 💼 [LinkedIn](https://www.linkedin.com/in/aanchal-c-b34a262b2/)
-  - 🐙 [GitHub](https://www.google.com/search?q=https://github.com/yourusername)
+  - 🐙 [GitHub](https://github.com/Aanchal749)
   - 📧 Email: aanchalsingh5627448@gmail.com
 
 -----

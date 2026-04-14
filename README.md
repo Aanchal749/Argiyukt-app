@@ -42,15 +42,23 @@ AgriYukt democratizes the agricultural supply chain by providing a direct, verif
 
 ## 📸 App Interface & Mockups
 
-*(Replace these placeholder links with your actual image URLs hosted on GitHub or Imgur)*
+<p align="center"><b>App Screens Preview</b></p>
 
-\<div align="center"\>
-\<img src="[https://via.placeholder.com/250x500.png?text=Login+Screen](https://www.google.com/search?q=https://via.placeholder.com/250x500.png%3Ftext%3DLogin%2BScreen)" width="24%"\>
-\<img src="[https://via.placeholder.com/250x500.png?text=Dashboard](https://www.google.com/search?q=https://via.placeholder.com/250x500.png%3Ftext%3DDashboard)" width="24%"\>
-\<img src="[https://via.placeholder.com/250x500.png?text=AI+Scanner](https://www.google.com/search?q=https://via.placeholder.com/250x500.png%3Ftext%3DAI%2BScanner)" width="24%"\>
-\<img src="[https://via.placeholder.com/250x500.png?text=DigiLocker+KYC](https://www.google.com/search?q=https://via.placeholder.com/250x500.png%3Ftext%3DDigiLocker%2BKYC)" width="24%"\>
-\</div\>
+<div align="center">
+  <img src="https://raw.githubusercontent.com/Aanchal749/Argiyukt-app/4defeea1e3fce8e2c67bb2f26778a8234af02733/ai%20scan.jpeg" alt="AI Scan" width="24%">
 
+  <img src="https://raw.githubusercontent.com/Aanchal749/Argiyukt-app/4defeea1e3fce8e2c67bb2f26778a8234af02733/buyer%20market%20tab.jpeg" alt="Buyer Market Tab" width="24%">
+
+  <img src="https://raw.githubusercontent.com/Aanchal749/Argiyukt-app/4defeea1e3fce8e2c67bb2f26778a8234af02733/farmer%20crop.jpeg" alt="Farmer Crop Screen" width="24%">
+
+  <img src="https://raw.githubusercontent.com/Aanchal749/Argiyukt-app/4defeea1e3fce8e2c67bb2f26778a8234af02733/inspector%20farmer%20list.jpeg" alt="Inspector Farmer List" width="24%">
+</div>
+
+<br>
+
+<div align="center">
+  <img src="https://raw.githubusercontent.com/Aanchal749/Argiyukt-app/4defeea1e3fce8e2c67bb2f26778a8234af02733/market%20intelligence.jpeg" alt="Market Intelligence AI Prediction" width="30%">
+</div>
 -----
 
 ## 🛠️ Technology Stack

@@ -1,5 +1,5 @@
 \<div align="center"\>
-\<img src="[https://via.placeholder.com/150x150.png?text=AgriYukt+Logo](agriyukt logo.jpeg)" alt="AgriYukt Logo" width="120"\>
+\<img src="[https://github.com/Aanchal749/Argiyukt-app/blob/7cc178ce4839c6cf2b142f1802aa08c1a4c3155a/agriyukt%20logo.jpeg)" alt="AgriYukt Logo" width="120"\>
 
 # 🌱 AgriYukt
 
